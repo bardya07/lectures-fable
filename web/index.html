@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Lectures Fable</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="strip" hidden></div>
+<main id="scroller" tabindex="-1"><div id="grid"></div></main>
+
+<div id="card" hidden></div>
+<div id="toast" hidden><span id="toast-text"></span><button type="button" id="toast-undo">Undo</button></div>
+<div id="measure" aria-hidden="true"></div>
+
+<dialog id="item-dlg">
+  <form id="item-form" autocomplete="off">
+    <div class="seg" role="radiogroup" aria-label="Type">
+      <label><input type="radio" name="type" value="lecture"><span>Lecture</span></label>
+      <label><input type="radio" name="type" value="assignment"><span>Assignment</span></label>
+      <label><input type="radio" name="type" value="exam"><span>Exam</span></label>
+    </div>
+
+    <label class="field"><span>Class</span><select name="classId"></select></label>
+    <div class="field">
+      <span>Date</span>
+      <input type="hidden" name="date">
+      <div class="week-stepper">
+        <button type="button" id="week-prev" aria-label="Previous week">‹</button>
+        <span id="week-label" aria-live="polite"></span>
+        <button type="button" id="week-next" aria-label="Next week">›</button>
+      </div>
+      <div class="seg date-days" id="date-days" role="radiogroup" aria-label="Day"></div>
+    </div>
+
+    <label class="field"><span>Title</span><input type="text" name="title" maxlength="200" spellcheck="false"></label>
+
+    <label class="field"><span>Link</span>
+      <span class="with-btn">
+        <input type="text" name="link" placeholder="https://" spellcheck="false" autocapitalize="off">
+        <button type="button" id="link-open" hidden>Open</button>
+      </span>
+    </label>
+
+    <div class="field" id="repeat">
+      <span>Repeat weekly</span>
+      <div class="repeat-row">
+        <div class="weekdays" id="weekdays"></div>
+        <label class="until">until <input type="date" name="until"></label>
+      </div>
+    </div>
+
+    <label class="check"><input type="checkbox" name="done"><span id="done-label">Done</span></label>
+
+    <footer>
+      <button type="button" id="item-delete" class="danger">Delete</button>
+      <span class="grow"></span>
+      <button type="button" id="item-cancel">Cancel</button>
+      <button type="submit" id="item-save" class="primary">Add</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="calendars-dlg" aria-labelledby="calendars-title">
+  <h2 id="calendars-title">Calendars</h2>
+  <div id="calendar-list"></div>
+  <div id="calendar-unmatched" hidden></div>
+  <form id="calendar-form" autocomplete="off">
+    <label class="field"><span>URL</span><input type="text" name="url" placeholder="https://" spellcheck="false" autocapitalize="off"></label>
+    <label class="field"><span>Class</span><select name="classId"></select></label>
+    <div id="calendar-error" role="alert" hidden></div>
+    <footer>
+      <button type="button" id="calendar-import">Import .ics</button>
+      <span class="grow"></span>
+      <button type="button" id="calendar-close">Close</button>
+      <button type="submit" class="primary">Add calendar</button>
+    </footer>
+  </form>
+</dialog>
+
+<script src="core.js"></script>
+<script src="calendar.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
