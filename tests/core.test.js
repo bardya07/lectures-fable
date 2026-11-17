@@ -134,14 +134,31 @@ test('recurrence: Mon/Wed/Fri until a date, inclusive', () => {
   eq(C.recurrence('2026-09-09', '2035-12-31', [0, 1, 2, 3, 4, 5, 6]).length, 400);
 });
 
-test('addSeries: skips days that already have a lecture, numbers assignments, can mark past done', () => {
+test('addSeries: skips dates with a lecture, keeps fields and can mark past occurrences done', () => {
   const s = state(['a'], [lec('x', 'a', '2026-11-11')]);
-  const added = C.addSeries(s, { classId: 'a', type: 'lecture', title: 'ignored', link: 'https://x.y' }, ['2026-11-09', '2026-11-11', '2026-11-13', '2026-11-16'], { today: TODAY, donePast: true });
-  eq(added.map(i => [i.date, i.done, i.title, i.link]), [['2026-11-09', true, '', 'https://x.y'], ['2026-11-13', true, '', 'https://x.y'], ['2026-11-16', false, '', 'https://x.y']]);
+  const added = C.addSeries(s, { classId: 'a', type: 'lecture', title: 'Plant biology', link: 'https://x.y', done: true },
+    ['2026-11-09', '2026-11-11', '2026-11-13', '2026-11-16'], { today: TODAY });
+  eq(added.map(i => [i.date, i.done, i.title, i.link]), [
+    ['2026-11-09', true, 'Plant biology', 'https://x.y'], ['2026-11-13', true, 'Plant biology', 'https://x.y'],
+    ['2026-11-16', false, 'Plant biology', 'https://x.y'],
+  ]);
   eq(s.items.length, 4);
   eq(new Set(s.items.map(i => i.id)).size, 4);
-  const hw = C.addSeries(s, { classId: 'a', type: 'assignment', title: 'PS', link: '' }, ['2026-11-20', '2026-11-27'], { today: TODAY });
-  eq(hw.map(i => i.title), ['PS 1', 'PS 2']);
+});
+
+test('addSeries: assignment, exam and untitled lecture labels follow the selected type', () => {
+  const s = state(['a'], []);
+  const dates = ['2026-11-20', '2026-11-27'];
+  for (const [type, title, expected] of [
+    ['assignment', 'PS', ['PS 1', 'PS 2']],
+    ['assignment', '', ['Assignment', 'Assignment']],
+    ['exam', 'Skills check', ['Skills check', 'Skills check']],
+    ['lecture', '', ['Lecture 1', 'Lecture 2']],
+  ]) {
+    const added = C.addSeries(s, { classId: 'a', type, title, link: '' }, dates, { today: TODAY });
+    const nums = C.lectureNumbers(s);
+    eq(added.map(i => [i.classId, i.type, i.date, C.title(i, nums)]), dates.map((date, index) => ['a', type, date, expected[index]]));
+  }
 });
 
 test('markThrough, markPastDone, removeFollowing only touch that class\'s lectures', () => {
@@ -257,12 +274,12 @@ test('links: bare domains get https, paths and other schemes are left alone', ()
 test('titles', () => {
   const s = state(['a'], [lec('l1', 'a', '2026-09-09'), lec('l2', 'a', '2026-09-11', { title: 'Membranes' }), item('e', 'a', 'exam', '2026-10-01'), item('h', 'a', 'assignment', '2026-10-02', { title: 'PS 3' })]);
   const n = C.lectureNumbers(s);
-  eq(s.items.map(i => C.title(i, n)), ['Lecture 1', 'Lecture 2 · Membranes', 'Exam', 'PS 3']);
+  eq(s.items.map(i => C.title(i, n)), ['Lecture 1', 'Membranes', 'Exam', 'PS 3']);
 });
 
 test('calendar: unfolds lines and decodes text escapes', () => {
   const events = C.parseICS('BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:event-1\r\nDTSTART;VALUE=DATE:20261114\r\nSUMMARY:First\\, second\\; third\\nLong\r\n  title\r\nDESCRIPTION:See https://example.test/a\\,b\r\nEND:VEVENT\r\nEND:VCALENDAR');
-  eq(events, [{ uid: 'event-1', title: 'First, second; third\nLong title', date: '2026-11-14', link: 'https://example.test/a,b', occurrence: '' }]);
+  eq(events, [{ uid: 'event-1', title: 'First, second; third\nLong title', date: '2026-11-14', link: 'https://example.test/a,b', occurrence: '', type: 'assignment' }]);
 });
 
 test('calendar: dates, floating time, UTC and TZID use local dates', () => {

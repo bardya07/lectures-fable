@@ -1,10 +1,10 @@
 #!/bin/bash
-# Builds build/Lectures Fable.app using only the command-line Swift compiler.
+# Builds build/Grod.app using only the command-line Swift compiler.
 # No Xcode project, no packages, no downloads.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-NAME="Lectures Fable"
+NAME="Grod"
 BUNDLE_ID="com.local.lectures-fable"
 VERSION="$(cat "$HERE/VERSION")"
 BUILD="$HERE/build"

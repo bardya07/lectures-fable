@@ -1,6 +1,6 @@
 import Foundation
 
-/// The data file: ~/Library/Application Support/Lectures Fable/data.json, plus dated copies in Backups/.
+/// The data file: ~/Library/Application Support/Grod/data.json, plus dated copies in Backups/.
 final class Store {
     enum Failure: LocalizedError {
         case locked, invalid
@@ -21,12 +21,51 @@ final class Store {
     private var locked = false
     private let fm = FileManager.default
 
-    init() {
+    convenience init() {
         if let override = Launch.dataDirectory {
-            directory = override
+            self.init(directory: override)
         } else {
-            let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            directory = base.appendingPathComponent("Lectures Fable", isDirectory: true)
+            let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            self.init(applicationSupportDirectory: base)
+        }
+    }
+
+    private init(directory: URL) {
+        self.directory = directory
+    }
+
+    convenience init(applicationSupportDirectory base: URL) {
+        self.init(directory: base.appendingPathComponent("Grod", isDirectory: true))
+        let legacyDirectory = base.appendingPathComponent("Lectures Fable", isDirectory: true)
+        let legacyFile = legacyDirectory.appendingPathComponent(file.lastPathComponent)
+        guard !fm.fileExists(atPath: file.path), fm.fileExists(atPath: legacyFile.path) else { return }
+
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            let legacyBackups = legacyDirectory.appendingPathComponent(backups.lastPathComponent, isDirectory: true)
+            if fm.fileExists(atPath: legacyBackups.path) {
+                try fm.createDirectory(at: backups, withIntermediateDirectories: true)
+                for source in try fm.contentsOfDirectory(at: legacyBackups, includingPropertiesForKeys: nil) {
+                    try copyIfMissing(source, to: backups.appendingPathComponent(source.lastPathComponent))
+                }
+            }
+            // Publish data.json last so an interrupted migration can retry the backups.
+            try copyIfMissing(legacyFile, to: file)
+        } catch {
+            locked = true
+            notice = "Your previous data couldn’t be copied to Grod, so changes won’t be saved this time.\n\n\(error.localizedDescription)"
+        }
+    }
+
+    private func copyIfMissing(_ source: URL, to target: URL) throws {
+        guard !fm.fileExists(atPath: target.path) else { return }
+        let staged = target.deletingLastPathComponent().appendingPathComponent(".migration-\(UUID())")
+        defer { try? fm.removeItem(at: staged) }
+        try fm.copyItem(at: source, to: staged)
+        do {
+            try fm.moveItem(at: staged, to: target)
+        } catch CocoaError.fileWriteFileExists {
+            // Another launch already put a file there.
         }
     }
 

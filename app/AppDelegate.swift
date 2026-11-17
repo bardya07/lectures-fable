@@ -75,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeWindow() {
         let configuration = WKWebViewConfiguration()
+        if Launch.isSelfTest { configuration.websiteDataStore = .nonPersistent() }
         configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "app")
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720), configuration: configuration)
         webView.navigationDelegate = self
@@ -85,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window = MainWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
                             backing: .buffered, defer: false)
-        window.title = "Lectures Fable"
+        window.title = "Grod"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.backgroundColor = windowBackground
@@ -212,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Menu bar
 
     private func makeMenu() -> NSMenu {
-        let name = "Lectures Fable"
+        let name = "Grod"
         let main = NSMenu()
 
         func submenu(_ title: String, _ build: (NSMenu) -> Void) -> NSMenu {

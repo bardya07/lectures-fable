@@ -3,6 +3,8 @@ import AppKit
 /// Checks GitHub releases without downloading or installing anything.
 @MainActor
 final class UpdateChecker {
+    private static let repository = "bardya07/lectures-fable"
+
     struct Release: Decodable {
         let tag_name: String
         let html_url: String
@@ -45,10 +47,10 @@ final class UpdateChecker {
         if manual { manualPending = true }
         // A manual request can share an automatic request already in flight.
         guard task == nil else { return }
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/bardya07/lectures-fable/releases/latest")!)
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repository)/releases/latest")!)
         request.timeoutInterval = 10
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("LecturesFable", forHTTPHeaderField: "User-Agent")
+        request.setValue("Grod", forHTTPHeaderField: "User-Agent")
         task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             let result: (Release, URL)?
             if error == nil, let response = response as? HTTPURLResponse, response.statusCode == 200,

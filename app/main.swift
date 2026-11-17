@@ -1,6 +1,6 @@
 import AppKit
 
-// Lectures Fable: a native window around a bundled web view (see web/).
+// Grod: a native window around a bundled web view (see web/).
 // AppKit owns the window, toolbar, menus, file panels and the data file.
 
 MainActor.assumeIsolated {

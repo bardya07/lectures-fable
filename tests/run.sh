@@ -2,7 +2,7 @@
 # Run the logic checks and the native WebKit checks with isolated, temporary data.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$HERE/build/Lectures Fable.app/Contents/MacOS/Lectures Fable"
+APP="$HERE/build/Grod.app/Contents/MacOS/Grod"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/lectures-fable-test.XXXXXX")"
 if [[ ${LECTURES_FABLE_KEEP_TEST_OUTPUT:-0} == 1 ]]; then
   echo "Test artifacts: $WORK"
@@ -12,7 +12,13 @@ fi
 
 swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/app/VersionComparison.swift" "$HERE/tests/version_comparison.test.swift" -o "$WORK/version-comparison-tests"
 "$WORK/version-comparison-tests"
+swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/app/Launch.swift" "$HERE/app/Store.swift" "$HERE/tests/store_migration.test.swift" -o "$WORK/store-migration-tests"
+"$WORK/store-migration-tests" "$WORK/application-support"
+cp "$HERE/tests/fixtures/canvas.ics" "$WORK/calendar.ics"
+swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/app/CalendarFetch.swift" "$HERE/tests/calendar_fetch.test.swift" -o "$WORK/calendar-fetch-tests"
+"$WORK/calendar-fetch-tests" "$WORK/calendar.ics"
 node "$HERE/tests/core.test.js"
+node "$HERE/tests/calendar.test.js"
 if [[ ! -x "$APP" ]]; then
   echo "Build the app first with fable/build.sh" >&2
   exit 1
@@ -40,6 +46,7 @@ with open(sys.argv[1], 'w') as f:
     json.dump({'classes': classes, 'items': items}, f)
 PY
 LECTURES_FABLE_DATA_DIR="$WORK/data" LECTURES_FABLE_OUT="$WORK/out" \
-LECTURES_FABLE_IMPORT="$WORK/import.json" LECTURES_FABLE_SELFTEST="$HERE/tests/ui.test.js" \
+LECTURES_FABLE_IMPORT="$WORK/import.json" LECTURES_FABLE_CALENDAR_FIXTURE="$WORK/calendar.ics" \
+LECTURES_FABLE_SELFTEST="$HERE/tests/ui.test.js" \
   "$APP" || { cat "$WORK/out/result.json" 2>/dev/null || true; exit 1; }
 cat "$WORK/out/result.json"

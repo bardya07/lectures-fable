@@ -19,7 +19,7 @@
 
   const click = (el, detail, extra) => el.dispatchEvent(new MouseEvent('click', Object.assign({ bubbles: true, cancelable: true, detail: detail === undefined ? 1 : detail }, extra)));
   const type = (input, value) => { input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); };
-  const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+  const key = (el, k, extra) => el.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ key: k, bubbles: true, cancelable: true }, extra)));
   const chip = id => $('.chip[data-id="' + id + '"]');
   const row = classId => $('.row[data-class="' + classId + '"]');
   const snap = name => bridge({ op: 'test.snapshot', name });
@@ -200,7 +200,7 @@
     type(f.until, '2026-12-04');
     const mwf = C.recurrence(start, '2026-12-04', [0, 2, 4]);
     eq('button shows how many will be added', $('#item-save').textContent, 'Add ' + mwf.length);
-    check('series lectures are numbered automatically', f.title.disabled);
+    check('lecture repeats can have a title', !f.title.disabled);
     await snap('02-bulk-add-form');
     $('#item-form').requestSubmit();
     await sleep(30);
@@ -279,7 +279,7 @@
     chip(target).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
     await sleep(450);
     check('hover card appears without a native pill tooltip', !$('#card').hidden && !chip(target).hasAttribute('title') && !!chip(target).getAttribute('aria-label'));
-    eq('card names the lecture', $('#card .c1').textContent, 'Lecture 11 · Membranes');
+    eq('card names the lecture', $('#card .c1').textContent, 'Membranes');
     eq('card offers the link', $('#card .open span').textContent, 'canvas.ubc.ca');
     await snap('04-hover-card');
     click($('#card .open'));
@@ -301,7 +301,7 @@
     selectDate(C.addDays(today, 5));
     $('input[name="type"][value="exam"]').checked = true;
     $('#item-form').dispatchEvent(new Event('change', { bubbles: true }));
-    check('exams cannot repeat', $('#repeat').hidden);
+    check('exams can repeat', !$('#repeat').hidden);
     type(f.title, 'Midterm 2');
     $('#item-form').requestSubmit();
     await sleep(30);
@@ -400,6 +400,16 @@
     const dragId = dragItem.id, originalDate = dragItem.date, originalDone = dragItem.done;
     const point = el => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
     const pointer = (el, kind, p) => el.dispatchEvent(new PointerEvent(kind, { bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', button: 0, buttons: kind === 'pointerup' ? 0 : 1, clientX: p.x, clientY: p.y }));
+    const selection = () => $$('#grid .chip.selected').map(el => el.dataset.id);
+    const startPress = id => {
+      const p = point(chip(id));
+      pointer(chip(id), 'pointerdown', p);
+      return p;
+    };
+    const releasePress = (id, p, detail) => {
+      pointer(chip(id), 'pointerup', p);
+      click(chip(id), detail);
+    };
     const destPoint = (classId, offset) => {
       const r = $('.track', row(classId)).getBoundingClientRect();
       const i = C.weekIndex(originalDate, window.App.inspect().layout.R.start) + offset;
@@ -411,7 +421,7 @@
     check('movement under the drag threshold does not start a drag', !$('.drag-preview') && !$('.drop-target'));
     pointer(document, 'pointerup', from);
     click(chip(dragId));
-    eq('a normal click still toggles after small movement', find(dragId).done, !originalDone);
+    eq('a quick click toggles after small movement without selecting', [find(dragId).done, selection()], [!originalDone, []]);
     window.App.command('undo');
 
     from = point(chip(dragId));
@@ -422,6 +432,8 @@
     const dropStyle = getComputedStyle(dropTarget);
     check('drag target has no fill or outline', dropStyle.backgroundColor === 'rgba(0, 0, 0, 0)' && dropStyle.backgroundImage === 'none' && dropStyle.boxShadow === 'none' && dropStyle.outlineStyle === 'none' && dropStyle.borderStyle === 'none');
     check('current week band remains visible during drag', getComputedStyle($('.today-week', row(cs))).backgroundColor !== 'rgba(0, 0, 0, 0)');
+    await sleep(400);
+    eq('keeping a drag pressed past the hold time does not select', selection(), []);
     pointer(document, 'pointerup', to);
     click(document.elementFromPoint(to.x, to.y));
     eq('drop moves to the same weekday and target class without toggling or editing', [find(dragId).date, find(dragId).classId, find(dragId).done, dlg.open], [C.addDays(originalDate, 7), cs, originalDone, false]);
@@ -461,6 +473,78 @@
     pointer(document, 'pointerup', sidebarPoint);
     eq('dropping on the sidebar cancels a drag', JSON.stringify(find(dragId)), beforeDrag);
     await sleep(10);
+
+    // ------------------------------------------------------------ hold to select and delete
+    const otherId = lectures().find(it => it.id !== dragId && C.mondayOf(it.date) === C.mondayOf(today))?.id ?? lectures()[0].id;
+    for (const mode of ['timeline', 'compact']) {
+      window.App.command('view', mode);
+      const depth = window.App.inspect().undo;
+      let p = startPress(dragId);
+      pointer(document, 'pointermove', { x: p.x + 3, y: p.y });
+      await sleep(400);
+      eq(mode + ': holding under the drag threshold selects while pressed', selection(), [dragId]);
+      eq(mode + ': the selected pill has an outline', getComputedStyle(chip(dragId)).outlineStyle, 'solid');
+      releasePress(dragId, p);
+      eq(mode + ': releasing a hold leaves done and undo unchanged', [find(dragId).done, window.App.inspect().undo], [originalDone, depth]);
+
+      p = startPress(dragId);
+      releasePress(dragId, p, 2);
+      eq(mode + ': a quick press after a hold toggles instead of editing', [find(dragId).done, dlg.open], [!originalDone, false]);
+      p = startPress(dragId);
+      releasePress(dragId, p, 3);
+      eq(mode + ': two quick presses open the editor and leave done unchanged', [dlg.open, find(dragId).done, window.App.inspect().undo, selection()], [true, originalDone, depth, [dragId]]);
+      click($('#item-cancel'));
+      await sleep(30);
+
+      p = startPress(otherId);
+      await sleep(400);
+      eq(mode + ': selecting another pill replaces the selection', selection(), [otherId]);
+      const moved = { x: p.x + 4, y: p.y };
+      pointer(document, 'pointermove', moved);
+      releasePress(otherId, moved);
+      eq(mode + ': crossing the drag threshold restores the prior selection', [selection(), window.App.inspect().undo], [[dragId], depth]);
+      await sleep(10);
+
+      if (mode === 'timeline') key(document, 'Escape');
+      else click($('.cp-track', row(math)));
+      eq(mode + ': ' + (mode === 'timeline' ? 'Escape' : 'clicking empty space') + ' clears selection', selection(), []);
+      key(document, 'Delete');
+      eq(mode + ': Delete after clearing selection leaves data unchanged', JSON.stringify(find(dragId)), beforeDrag);
+
+      p = startPress(dragId);
+      await sleep(400);
+      releasePress(dragId, p);
+      if (mode === 'timeline') {
+        await window.App.classAction(bio, 'rename');
+        const input = $('#rename-input');
+        key(input, 'Backspace', { metaKey: true });
+        eq('Delete in a field leaves the selected item alone', [selection(), window.App.inspect().undo], [[dragId], depth]);
+        key(input, 'Escape');
+        window.App.openItem(dragId);
+        f.title.blur();
+        key(document, 'Delete');
+        eq('Delete is ignored while the editor is open', [selection(), window.App.inspect().undo], [[dragId], depth]);
+        click($('#item-cancel'));
+        await sleep(30);
+      }
+      key(document, mode === 'timeline' ? 'Backspace' : 'Delete', { metaKey: mode === 'timeline' });
+      eq(mode + ': keyboard delete removes the selected pill in one undo step', [!!find(dragId), selection(), window.App.inspect().undo], [false, [], depth + 1]);
+      eq(mode + ': undo is named for the deleted item type', (await menu(['Edit', 'Undo'], false)).title, 'Undo Delete Lecture');
+      window.App.command('undo');
+      eq(mode + ': one undo restores the item and leaves selection clear', [JSON.stringify(find(dragId)), selection(), window.App.inspect().undo], [beforeDrag, [], depth]);
+    }
+    window.App.command('view', 'timeline');
+    const assignmentPress = startPress(lab);
+    await sleep(400);
+    releasePress(lab, assignmentPress);
+    window.App.command('view', 'compact');
+    key(document, 'Delete');
+    check('hiding the selected pill clears its keyboard selection', !!find(lab));
+    window.App.command('view', 'timeline');
+    chip(dragId).focus({ preventScroll: true });
+    key(chip(dragId), 'Backspace');
+    check('Backspace deletes a keyboard-focused pill', !find(dragId));
+    window.App.command('undo');
 
     // ------------------------------------------------------------ text editing through the Edit menu
     await menu(['File', 'New Item…']);
@@ -574,6 +658,144 @@
     eq('current week marker follows the date', $$('.week-label').indexOf($('.week-label.now')), C.weekIndex(tomorrow, window.App.inspect().layout.R.start));
     C.now = realNow;
     window.dispatchEvent(new Event('focus'));
+
+    // ------------------------------------------------------------ weekly repeats
+    const repeatDate = C.addDays(today, 21);
+    const repeatDates = [repeatDate, C.addDays(repeatDate, 7)];
+    for (const [kind, title, titles] of [
+      ['lecture', 'Satellite tracking', ['Satellite tracking', 'Satellite tracking']],
+      ['assignment', 'Orbit worksheet', ['Orbit worksheet 1', 'Orbit worksheet 2']],
+      ['exam', 'Skills check', ['Skills check', 'Skills check']],
+    ]) {
+      const ids = new Set(state().items.map(item => item.id));
+      const undoCount = window.App.inspect().undo;
+      window.App.openItem(null, { classId: 'class3', date: repeatDate });
+      click($('#weekdays [data-wd="' + C.weekday(repeatDate) + '"]'));
+      f.type.value = kind;
+      type(f.until, repeatDates[1]);
+      type(f.title, title);
+      type(f.link, 'course.example.test/session');
+      eq(kind + ' repeat stays selected after switching type', $('#item-save').textContent, 'Add 2');
+      $('#item-form').requestSubmit();
+      const added = state().items.filter(item => !ids.has(item.id));
+      eq(kind + ' repeat stores dates, title, type, class and link', added.map(item =>
+        [item.date, item.title, item.type, item.classId, item.link]), repeatDates.map((date, index) =>
+        [date, titles[index], kind, 'class3', 'https://course.example.test/session']));
+      eq(kind + ' repeat is one undo step', window.App.inspect().undo, undoCount + 1);
+      window.App.command('undo');
+      eq(kind + ' repeat is undone as a group', state().items.length, ids.size);
+      await sleep(30);
+    }
+
+    // ------------------------------------------------------------ calendars with the native fixture bridge
+    window.App.command('new-class');
+    type($('#new-class-input'), 'PHY 567');
+    key($('#new-class-input'), 'Enter');
+    key($('#new-class-input'), 'Escape');
+    const physics = state().classes.find(cls => cls.name === 'PHY 567').id;
+    const calendarDlg = $('#calendars-dlg');
+    const calendarForm = $('#calendar-form');
+    const url = calendarForm.elements.url, picker = calendarForm.elements.classId;
+    const calendarError = $('#calendar-error');
+    const syncButton = id => $('[data-calendar-action="sync"][data-id="' + id + '"]');
+    const waitFor = async (name, condition) => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (condition()) return;
+        await sleep(20);
+      }
+      throw new Error('Timed out waiting for ' + name);
+    };
+    window.App.command('calendars');
+    check('Calendars opens with the URL ready for paste', calendarDlg.open && document.activeElement === url);
+    eq('class picker defaults to Auto', picker.value, '');
+    type(url, 'http://calendar.example.test/feed');
+    calendarForm.requestSubmit();
+    await waitFor('validation error', () => !calendarError.hidden);
+    eq('unsupported scheme shows a specific error', calendarError.textContent, 'Enter an HTTPS or webcal URL.');
+    type(url, 'https://missing.example.test/feed');
+    calendarForm.requestSubmit();
+    await waitFor('native fetch failure', () => !calendarError.hidden);
+    eq('failed native fetch leaves the form available and saves no feed',
+      [calendarError.textContent, url.disabled, state().calendars.length], ['Calendar not found.', false, 0]);
+    click($('#calendar-close'));
+    window.App.command('calendars');
+    check('reopening clears the old form error', calendarDlg.open && calendarError.hidden);
+
+    type(url, '');
+    const paste = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', { value: { getData: () => ' \nwebcal://calendar.example.test/feed  ' } });
+    url.dispatchEvent(paste);
+    eq('pasting a wrapped link puts a clean URL in the form', url.value, 'webcal://calendar.example.test/feed');
+    calendarForm.requestSubmit();
+    await waitFor('added auto calendar', () => state().calendars.length === 1 && !url.disabled);
+    const auto = state().calendars[0];
+    eq('successful add updates the list and resets the form', [
+      $('.calendar-url').textContent, url.value, picker.value, calendarError.hidden,
+    ], ['https://calendar.example.test/feed', '', '', true]);
+    const autoItems = () => state().items.filter(item => item.calendar?.feedId === auto.id);
+    eq('Auto matches all four fixture items by course code', autoItems().map(item => item.classId), Array(4).fill(physics));
+    eq('dialog shows unmatched and skipped counts', [
+      $('#calendar-unmatched > div').textContent, $('#calendar-skipped summary').textContent,
+    ], ['1 unmatched event', '2 skipped']);
+    const details = $('#calendar-skipped');
+    details.open = true;
+    await waitFor('notice list', () => !!$('#calendar-notices button'));
+    check('skipped titles can be reviewed', $('#calendar-notices').textContent.includes('Cutoff for Material'));
+    click($('#calendar-notices button'));
+    eq('a skipped notice can be imported', [autoItems().length, $('summary', details).textContent], [5, '1 skipped']);
+    $('#calendar-assign-class').value = 'class1';
+    click($('[data-calendar-action="assign"]'));
+    eq('unmatched events go to the selected class', [autoItems().find(item => item.title.startsWith('Podcast')).classId, $('#calendar-unmatched').hidden], ['class1', true]);
+
+    type(url, 'webcal://CALENDAR.example.test:443/feed#alternate');
+    calendarForm.requestSubmit();
+    await waitFor('duplicate URL error', () => !calendarError.hidden);
+    eq('normalization catches duplicate URLs', [calendarError.textContent, state().calendars.length], ['Calendar already added.', 1]);
+    click($('#calendar-close'));
+    const quiz = autoItems().find(item => item.type === 'exam');
+    window.App.openItem(quiz.id);
+    f.type.value = 'assignment';
+    $('#item-form').requestSubmit();
+    check('editing an imported type saves an override', find(quiz.id).calendar.edited.includes('type'));
+    window.App.command('calendars');
+    check('feed and its skipped count survive reopening', $('.calendar-url').textContent === auto.url && $('summary', details).textContent === '1 skipped');
+
+    let finishSync;
+    window.__testBridge = { calendarFetch: ({ url }) => url === auto.url
+      ? new Promise(resolve => { finishSync = resolve; })
+      : bridge({ op: 'calendarFetch', url }) };
+    click(syncButton(auto.id));
+    check('sync disables only the active feed’s Sync button', syncButton(auto.id).disabled && !url.disabled);
+    type(url, 'https://calendar.example.test/second');
+    picker.value = 'class2';
+    calendarForm.requestSubmit();
+    await waitFor('second calendar added during sync', () => state().calendars.length === 2 && !url.disabled);
+    const specific = state().calendars[1];
+    const specificItems = state().items.filter(item => item.calendar?.feedId === specific.id);
+    eq('specific class overrides bracket matching and the form resets', [
+      specific.classId, specificItems.length, specificItems.every(item => item.classId === 'class2'), picker.value,
+    ], ['class2', 5, true, '']);
+    finishSync({ error: 'Calendar request timed out.' });
+    await waitFor('sync error displayed in the row', () => $('#calendar-list').textContent.includes('Calendar request timed out.'));
+    delete window.__testBridge;
+    click(syncButton(auto.id));
+    await waitFor('successful retry', () => !syncButton(auto.id).disabled);
+    eq('retry clears the error and preserves type, assignment and notice', [
+      $('#calendar-list').textContent.includes('Calendar request timed out.'),
+      find(quiz.id).type, autoItems().find(item => item.title.startsWith('Podcast')).classId,
+      autoItems().filter(item => item.calendar.includeNotice).length, state().calendarUnmatched.length,
+    ], [false, 'assignment', 'class1', 1, 0]);
+    const beforeRemove = state().items.length;
+    click($('[data-calendar-action="remove"][data-id="' + auto.id + '"]'));
+    eq('Remove keeps imported items and clears that feed’s pending notices', [
+      state().calendars.length, state().items.length, autoItems().length, state().calendarSkipped.length,
+    ], [1, beforeRemove, 0, 2]);
+    picker.value = 'class3';
+    click($('#calendar-import'));
+    await waitFor('local ICS import', () => state().items.length === beforeRemove + 5 && !url.disabled);
+    eq('file import keeps skipped notices available', state().calendarSkipped.filter(note => note.feedId === '').length, 2);
+    eq('the saved fixture feed is the only subscription', (await saved()).calendars.map(feed => feed.id), [specific.id]);
+    click($('#calendar-close'));
 
     const chrome = await bridge({ op: 'test.chrome' });
     await bridge({ op: 'test.finish', result: { ok: failures.length === 0, checks: count, failures, chrome } });

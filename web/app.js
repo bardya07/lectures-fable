@@ -1,4 +1,4 @@
-/* Lectures Fable: rendering and interaction. All model logic lives in core.js. */
+/* Grod: rendering and interaction. All model logic lives in core.js. */
 (function () {
   'use strict';
 
@@ -68,7 +68,7 @@
   }
 
   // ---------------------------------------------------------------- state
-  let S = { classes: [], items: [], calendars: [], calendarUnmatched: [], settings: { view: 'timeline', theme: 'system' } };
+  let S = { classes: [], items: [], calendars: [], calendarUnmatched: [], calendarSkipped: [], settings: { view: 'timeline', theme: 'system' } };
   let today = C.todayISO();
   let nums = new Map();
   let stat = new Map();
@@ -78,19 +78,21 @@
   let followToday = true;
   let plannedScroll = null;
   let lastScrollLeft = 0;
+  let selectedId = null;
   const view = { addingClass: false, renaming: null, lastClassId: null, center: true };
   const undoStack = [];
   const redoStack = [];
 
   const find = id => S.items.find(it => it.id === id);
   const classOf = id => S.classes.find(c => c.id === id);
-  const snapshot = () => JSON.stringify({ classes: S.classes, items: S.items, calendars: S.calendars, calendarUnmatched: S.calendarUnmatched });
-  function restore(data) {
-    const d = JSON.parse(data);
+  const snapshot = () => JSON.stringify({ classes: S.classes, items: S.items, calendars: S.calendars,
+    calendarUnmatched: S.calendarUnmatched, calendarSkipped: S.calendarSkipped });
+  function restore(d) {
     S.classes = d.classes;
     S.items = d.items;
     S.calendars = d.calendars || [];
     S.calendarUnmatched = d.calendarUnmatched || [];
+    S.calendarSkipped = d.calendarSkipped || [];
   }
 
   // Every change to classes or items goes through here so it is saved and can be undone.
@@ -111,7 +113,7 @@
     const entry = from.pop();
     if (!entry) return false;
     to.push({ label: entry.label, data: snapshot() });
-    restore(entry.data);
+    restore(JSON.parse(entry.data));
     view.renaming = null;
     hideToast();
     persist();
@@ -181,7 +183,7 @@
     const it = s.nextDeadline || s.nextLecture;
     if (!it) return '';
     const n = C.diffDays(it.date, today);
-    const name = it.type === 'lecture' ? 'Lecture ' + nums.get(it.id) : C.title(it, nums);
+    const name = C.title(it, nums);
     const kind = it.type === 'lecture' ? '' : it.type === 'exam' ? 'exam' : 'asg';
     return '<b class="' + kind + '">' + esc(name) + '</b> ' + (it.type === 'assignment' ? 'due ' : '') + C.relative(n) + ' · ' + C.fmtMedium(it.date);
   }
@@ -189,7 +191,7 @@
   function nextText(s) {
     const it = s.nextDeadline || s.nextLecture;
     if (!it) return '';
-    const name = it.type === 'lecture' ? 'Lecture ' + nums.get(it.id) : C.title(it, nums);
+    const name = C.title(it, nums);
     return name + ' ' + (it.type === 'assignment' ? 'due ' : '') + C.relative(C.diffDays(it.date, today)) + ' · ' + C.fmtMedium(it.date);
   }
 
@@ -347,6 +349,11 @@
     }
     renderStrip();
     if (S.settings.view === 'compact') renderCompact(); else renderTimeline();
+    if (selectedId !== null) {
+      const selected = chipEl(selectedId);
+      if (selected) selected.classList.add('selected');
+      else selectedId = null;
+    }
     rendering = false;
     scroller.scrollLeft = x;
     scroller.scrollTop = y;
@@ -424,6 +431,8 @@
   }
 
   // ---------------------------------------------------------------- item actions
+  const itemTypeName = it => it.type[0].toUpperCase() + it.type.slice(1);
+
   function toggle(id) {
     const it = find(id);
     if (it) commit(it.done ? 'Mark as Not Done' : 'Mark as Done', () => { it.done = !it.done; });
@@ -432,6 +441,12 @@
   function openLink(id) {
     const it = find(id);
     if (it && it.link) call('open', { url: C.normalizeLink(it.link) }).catch(() => {});
+  }
+
+  function deleteItem(it, label = 'Delete') {
+    const name = C.title(it, nums);
+    commit(label, () => { S.items = S.items.filter(x => x.id !== it.id); });
+    toast('Deleted ' + name);
   }
 
   async function itemAction(id, action) {
@@ -446,18 +461,13 @@
         if (n > 1) toast(plural(n, 'lecture') + ' marked done');
         break;
       }
-      case 'delete': {
-        const name = C.title(it, nums);
-        commit('Delete', () => { S.items = S.items.filter(x => x.id !== id); });
-        toast('Deleted ' + name);
-        break;
-      }
+      case 'delete': deleteItem(it); break;
       case 'delete-following': {
         const list = C.classLectures(S, it.classId);
         const n = list.length - list.findIndex(x => x.id === id);
         const ok = await call('confirm', {
           title: 'Delete ' + plural(n, 'lecture') + '?',
-          message: 'Lecture ' + nums.get(id) + ' and everything after it in ' + classOf(it.classId).name + '.',
+          message: C.title(it, nums) + ' and everything after it in ' + classOf(it.classId).name + '.',
           confirm: 'Delete', destructive: true,
         });
         if (!ok) return;
@@ -575,14 +585,55 @@
   let lastToggle = null;
   let quietChip = null; // no hover card for the chip that was just clicked, until the pointer leaves it
 
-  // Pointer movement starts a drag only after a small threshold, preserving clicks.
-  let drag = null, suppressDragClick = false;
+  function selectChip(id) {
+    const chip = id === null ? null : chipEl(id);
+    const nextId = chip ? id : null;
+    if (nextId === selectedId) return;
+    if (selectedId !== null) chipEl(selectedId)?.classList.remove('selected');
+    selectedId = nextId;
+    chip?.classList.add('selected');
+  }
+
+  function clearSelection() {
+    selectChip(null);
+    $('.chip:focus', grid)?.blur();
+  }
+
+  const HOLD_MS = 350, DRAG_PX = 4;
+  let press = null, suppressPressClick = false;
   const dropMarker = document.createElement('div');
   dropMarker.className = 'drop-target';
-  function clearDragVisuals() {
+
+  function clearDragVisuals(current) {
     dropMarker.remove();
-    if (drag && drag.preview) drag.preview.remove();
-    if (drag && drag.chip) drag.chip.classList.remove('drag-source');
+    if (current.preview) {
+      current.preview.remove();
+      current.chip.classList.remove('drag-source');
+    }
+  }
+  function endPress() {
+    clearTimeout(press.timer);
+    clearDragVisuals(press);
+    press = null;
+  }
+  function hold(current) {
+    current.held = true;
+    current.previousSelection = selectedId;
+    lastToggle = null;
+    if (!current.chip.isConnected || dlg.open || calendarsDlg.open) return;
+    selectChip(current.id);
+    hideCard();
+    quietChip = current.id;
+  }
+  function pastDragThreshold(current, e) {
+    return Math.hypot(e.clientX - current.x, e.clientY - current.y) >= DRAG_PX;
+  }
+  function markMoved(current) {
+    current.moved = true;
+    clearTimeout(current.timer);
+    // A slow drag can cross the threshold after the hold ring appeared.
+    if (current.held && selectedId === current.id) selectChip(current.previousSelection);
+    lastToggle = null;
   }
   function dragTarget(e) {
     const viewport = scroller.getBoundingClientRect();
@@ -595,30 +646,35 @@
     return { track, slot: slotAt(track, e) };
   }
   grid.addEventListener('pointerdown', e => {
-    const chip = e.target.closest('.week-chip');
-    if (!chip || layout.view !== 'timeline' || e.button !== 0 || drag) return;
-    drag = { id: chip.dataset.id, chip, pointerId: e.pointerId, x: e.clientX, y: e.clientY, active: false, cancelled: false };
+    const chip = e.target.closest('.chip');
+    if (!chip || e.button !== 0 || press) return;
+    press = { id: chip.dataset.id, chip, pointerId: e.pointerId, x: e.clientX, y: e.clientY, start: e.timeStamp };
+    const current = press;
+    current.timer = setTimeout(() => hold(current), HOLD_MS);
   });
   document.addEventListener('pointermove', e => {
-    if (!drag || e.pointerId !== drag.pointerId || drag.cancelled) return;
-    if (!drag.active) {
-      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 4) return;
-      drag.active = true;
-      lastToggle = null;
+    const current = press;
+    if (!current || e.pointerId !== current.pointerId || current.cancelled) return;
+    if (!current.moved) {
+      if (!pastDragThreshold(current, e)) return;
+      markMoved(current);
+      if (!current.chip.classList.contains('week-chip') || !current.chip.isConnected) return;
       hideCard();
       hideGhost();
-      const r = drag.chip.getBoundingClientRect();
-      drag.offsetX = drag.x - r.left;
-      drag.offsetY = drag.y - r.top;
-      drag.preview = drag.chip.cloneNode(true);
-      drag.preview.classList.add('drag-preview');
-      drag.preview.style.width = r.width + 'px';
-      document.body.appendChild(drag.preview);
-      drag.chip.classList.add('drag-source');
+      const r = current.chip.getBoundingClientRect();
+      current.offsetX = current.x - r.left;
+      current.offsetY = current.y - r.top;
+      current.preview = current.chip.cloneNode(true);
+      current.preview.classList.remove('selected');
+      current.preview.classList.add('drag-preview');
+      current.preview.style.width = r.width + 'px';
+      document.body.appendChild(current.preview);
+      current.chip.classList.add('drag-source');
     }
+    if (!current.preview) return;
     e.preventDefault();
-    drag.preview.style.left = (e.clientX - drag.offsetX) + 'px';
-    drag.preview.style.top = (e.clientY - drag.offsetY) + 'px';
+    current.preview.style.left = (e.clientX - current.offsetX) + 'px';
+    current.preview.style.top = (e.clientY - current.offsetY) + 'px';
     const target = dragTarget(e);
     if (target) {
       dropMarker.style.left = target.slot.index * WEEK_W + 'px';
@@ -626,49 +682,70 @@
     } else dropMarker.remove();
   });
   document.addEventListener('pointerup', e => {
-    if (!drag || e.pointerId !== drag.pointerId) return;
-    const current = drag;
-    const target = current.active && !current.cancelled ? dragTarget(e) : null;
-    clearDragVisuals();
-    drag = null;
-    if (!current.active) return;
-    // A click may be synthesized after pointerup even though a drag occurred.
-    suppressDragClick = true;
-    setTimeout(() => { suppressDragClick = false; }, 0);
+    const current = press;
+    if (!current || e.pointerId !== current.pointerId) return;
+    if (!current.cancelled && !current.moved) {
+      if (pastDragThreshold(current, e)) markMoved(current);
+      else if (!current.held && e.timeStamp - current.start >= HOLD_MS) hold(current);
+    }
+    const target = current.preview && !current.cancelled && current.chip.isConnected ? dragTarget(e) : null;
+    endPress();
+    if (!current.held && !current.moved && !current.cancelled) return;
+    // WebKit can send a click after pointerup even after a hold or drag.
+    suppressPressClick = true;
+    setTimeout(() => { suppressPressClick = false; }, 0);
     e.preventDefault();
     if (target) {
       const it = find(current.id);
       if (it) {
-        const label = 'Move ' + (it.type === 'lecture' ? 'Lecture' : it.type === 'exam' ? 'Exam' : 'Assignment');
         const week = C.addDays(layout.R.start, target.slot.index * 7);
-        commit(label, () => C.moveItemToWeek(S, current.id, target.slot.classId, week));
+        commit('Move ' + itemTypeName(it), () => C.moveItemToWeek(S, current.id, target.slot.classId, week));
       }
     }
   });
   document.addEventListener('pointercancel', e => {
-    if (!drag || e.pointerId !== drag.pointerId) return;
-    clearDragVisuals();
-    drag = null;
+    if (!press || e.pointerId !== press.pointerId) return;
+    if (press.held && !press.moved && selectedId === press.id) selectChip(press.previousSelection);
+    endPress();
   });
   window.addEventListener('blur', () => {
-    if (!drag) return;
-    clearDragVisuals();
-    drag = null;
+    if (press) endPress();
   });
   document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape' || !drag || !drag.active) return;
-    e.preventDefault();
-    e.stopPropagation();
-    drag.cancelled = true;
-    clearDragVisuals();
+    const escape = e.key === 'Escape';
+    if (!escape && e.key !== 'Delete' && e.key !== 'Backspace') return;
+    if (e.defaultPrevented || e.isComposing || dlg.open || calendarsDlg.open) return;
+    const active = document.activeElement;
+    if (active && (active.matches('input, textarea, select') || active.isContentEditable)) return;
+    const focused = active?.matches('#grid .chip') ? active : null;
+    if (escape) {
+      if (selectedId === null && !focused && !press) return;
+      e.preventDefault();
+      if (press) {
+        if (press.preview) e.stopPropagation();
+        press.cancelled = true;
+        clearTimeout(press.timer);
+        clearDragVisuals(press);
+      }
+      clearSelection();
+    } else {
+      if (e.altKey || e.ctrlKey || e.shiftKey) return;
+      const it = find(selectedId ?? focused?.dataset.id);
+      if (!it) return;
+      e.preventDefault();
+      deleteItem(it, 'Delete ' + itemTypeName(it));
+    }
   }, true);
   grid.addEventListener('dragstart', e => { if (e.target.closest('.week-chip')) e.preventDefault(); });
   document.addEventListener('click', e => {
-    if (!suppressDragClick) return;
-    suppressDragClick = false;
+    if (!suppressPressClick || e.detail === 0) return;
+    suppressPressClick = false;
     e.preventDefault();
     e.stopImmediatePropagation();
   }, true);
+  document.addEventListener('click', e => {
+    if (e.target instanceof Element && !e.target.closest('button, input, select, textarea, a, [contenteditable], [data-act], #card, dialog')) clearSelection();
+  });
 
   grid.addEventListener('click', e => {
     const add = e.target.closest('.ghost');
@@ -686,10 +763,10 @@
       hideCard();
       quietChip = id;
       if (e.metaKey) { openLink(id); return; }
-      if (e.detail === 2) {
+      if (e.detail > 1 && lastToggle?.id === id && lastToggle.detail === e.detail - 1) {
         // The first click of a double-click already toggled the item; take that back and edit.
-        if (lastToggle && lastToggle.id === id && undoStack[undoStack.length - 1] === lastToggle.entry) {
-          restore(undoStack.pop().data);
+        if (undoStack[undoStack.length - 1] === lastToggle.entry) {
+          restore(JSON.parse(undoStack.pop().data));
           if (lastToggle.evicted) undoStack.unshift(lastToggle.evicted);
           redoStack.push(...lastToggle.redo);
           persist();
@@ -699,11 +776,10 @@
         openItem(id);
         return;
       }
-      if (e.detail > 2) return;
       const redo = redoStack.slice();
       const evicted = undoStack.length === 200 ? undoStack[0] : null;
       toggle(id);
-      lastToggle = { id, entry: undoStack[undoStack.length - 1], redo, evicted };
+      lastToggle = { id, detail: e.detail, entry: undoStack[undoStack.length - 1], redo, evicted };
       return;
     }
 
@@ -1017,7 +1093,7 @@
     syncNative();
   }
 
-  const isSeries = () => !editingId && f.type.value !== 'exam' && repeatDays.size > 0;
+  const isSeries = () => !editingId && repeatDays.size > 0;
 
   // The dates a repeat would actually add (lectures never double up on a day).
   function seriesDates() {
@@ -1032,15 +1108,12 @@
   function refreshForm() {
     const type = f.type.value;
     const series = isSeries();
-    $('#repeat').hidden = !!editingId || type === 'exam';
+    $('#repeat').hidden = !!editingId;
     if (series && !f.until.value && C.isISO(f.date.value)) f.until.value = C.addDays(f.date.value, 13 * 7 - 1);
     for (const b of weekdaysEl.children) b.setAttribute('aria-pressed', repeatDays.has(+b.dataset.wd));
     f.until.disabled = !series;
 
-    const lectureSeries = series && type === 'lecture';
-    f.title.disabled = lectureSeries;
-    if (lectureSeries) f.title.placeholder = 'Numbered automatically';
-    else if (type === 'lecture') {
+    if (type === 'lecture') {
       const n = editingId && find(editingId).type === 'lecture' && find(editingId).classId === f.classId.value && find(editingId).date === f.date.value
         ? nums.get(editingId)
         : 1 + S.items.filter(it => it.id !== editingId && it.classId === f.classId.value && it.type === 'lecture' && it.date <= f.date.value).length;
@@ -1081,12 +1154,12 @@
     let message = '';
     if (editingId) {
       const id = editingId;
-      commit('Edit', () => { const it = find(id); if (it) Object.assign(it, base); });
+      commit('Edit', () => { const it = find(id); if (it) window.Calendar.editItem(it, base); });
       show = id;
     } else if (isSeries()) {
       const dates = seriesDates();
       if (!dates.length) return;
-      const added = commit('Add', () => C.addSeries(S, base, dates, { today, donePast: base.done }));
+      const added = commit('Add', () => C.addSeries(S, base, dates, { today }));
       show = added[0].id;
       message = 'Added ' + plural(added.length, base.type);
     } else {
@@ -1120,8 +1193,10 @@
   // ---------------------------------------------------------------- calendars
   const calendarsDlg = $('#calendars-dlg'), calendarForm = $('#calendar-form');
   const calendarList = $('#calendar-list'), calendarUnmatched = $('#calendar-unmatched');
-  const calendarError = $('#calendar-error');
-  let calendarBusy = false;
+  const calendarError = $('#calendar-error'), calendarSkipped = $('#calendar-skipped');
+  const calendarNotices = $('#calendar-notices'), calendarURL = calendarForm.elements.url;
+  let calendarFormBusy = false;
+  let calendarClassOptions = '';
 
   function calendarOptions(auto) {
     return (auto ? '<option value="">Auto</option>' : '') + S.classes.map(c =>
@@ -1132,59 +1207,104 @@
     if (!calendarsDlg.open || !window.CalendarUIHooks) return;
     const data = window.CalendarUIHooks.list();
     const picker = calendarForm.elements.classId;
-    const selected = picker.value;
-    picker.innerHTML = calendarOptions(true);
-    picker.value = [...picker.options].some(o => o.value === selected) ? selected : '';
-    calendarList.innerHTML = (data.feeds || []).map(feed => {
+    const options = calendarOptions(true);
+    if (calendarClassOptions !== options) {
+      const selected = picker.value;
+      calendarClassOptions = options;
+      picker.innerHTML = options;
+      picker.value = classOf(selected) ? selected : '';
+    }
+    calendarList.innerHTML = data.feeds.map(feed => {
       const cls = classOf(feed.classId);
-      const when = feed.lastSynced && !isNaN(Date.parse(feed.lastSynced)) ? new Date(feed.lastSynced).toLocaleString() : 'Never';
+      const when = feed.syncing ? 'Syncing…' : feed.lastSynced && !isNaN(Date.parse(feed.lastSynced))
+        ? new Date(feed.lastSynced).toLocaleString() : 'Never synced';
       return '<div class="calendar-row"><div class="calendar-info"><div class="calendar-url" title="' + esc(feed.url) + '">' + esc(feed.url) + '</div><div class="calendar-meta">' + esc(cls ? cls.name : 'Auto') + ' · ' + esc(when) + (feed.error ? ' · ' + esc(feed.error) : '') + '</div></div>' +
-        '<button type="button" data-calendar-action="sync" data-id="' + esc(feed.id) + '">Sync</button><button type="button" data-calendar-action="remove" data-id="' + esc(feed.id) + '">Remove</button></div>';
+        '<button type="button" data-calendar-action="sync" data-id="' + esc(feed.id) + '"' + (feed.syncing ? ' disabled' : '') + '>Sync</button><button type="button" data-calendar-action="remove" data-id="' + esc(feed.id) + '">Remove</button></div>';
     }).join('');
-    const count = data.unmatched || 0;
+    const previousAssignment = $('#calendar-assign-class')?.value;
+    const count = data.unmatched;
     calendarUnmatched.hidden = !count;
-    calendarUnmatched.innerHTML = count ? '<div>Imported · ' + count + ' ' + (count === 1 ? 'event didn’t' : 'events didn’t') + ' match a class</div>' +
+    calendarUnmatched.innerHTML = count ? '<div>' + plural(count, 'unmatched event') + '</div>' +
       '<label class="field"><span>Assign to</span><span class="with-btn"><select id="calendar-assign-class">' + calendarOptions(false) + '</select><button type="button" data-calendar-action="assign"' + (S.classes.length ? '' : ' disabled') + '>Assign</button></span></label>' : '';
-    calendarsDlg.querySelectorAll('button, input, select').forEach(el => {
-      el.disabled = calendarBusy || (el.dataset.calendarAction === 'assign' && !S.classes.length);
-    });
+    if (count && classOf(previousAssignment)) $('#calendar-assign-class').value = previousAssignment;
+    calendarSkipped.hidden = !data.skipped.length;
+    calendarSkipped.querySelector('summary').textContent = data.skipped.length + ' skipped';
+    calendarNotices.innerHTML = calendarSkipped.open ? data.skipped.map((event, index) =>
+      '<div class="calendar-row"><div class="calendar-info"><div>' + esc(event.title || 'Untitled event') + '</div>' +
+      '<div class="calendar-meta">' + esc(C.fmtMedium(event.date)) + '</div></div>' +
+      '<button type="button" data-notice-index="' + index + '">Import</button></div>').join('') : '';
+    calendarForm.querySelectorAll('input, select, button:not(#calendar-close)').forEach(el => { el.disabled = calendarFormBusy; });
   }
 
-  async function calendarAction(action) {
-    if (calendarBusy) return;
-    calendarBusy = true;
+  function clearCalendarError() {
+    calendarError.textContent = '';
     calendarError.hidden = true;
+  }
+
+  async function calendarFormAction(action) {
+    if (calendarFormBusy) return;
+    calendarFormBusy = true;
+    clearCalendarError();
     refreshCalendars();
     try { await action(window.CalendarUIHooks); }
     catch (error) {
       calendarError.textContent = error && error.message ? error.message : 'Calendar failed.';
       calendarError.hidden = false;
     }
-    finally { calendarBusy = false; refreshCalendars(); }
+    finally { calendarFormBusy = false; refreshCalendars(); }
   }
 
   function openCalendars() {
-    if (!window.CalendarUIHooks) return;
-    calendarError.hidden = true;
+    if (!window.CalendarUIHooks || calendarsDlg.open) return;
+    clearCalendarError();
+    calendarSkipped.open = false;
     calendarsDlg.showModal();
     refreshCalendars();
+    calendarURL.focus();
     syncNative();
   }
+  calendarForm.addEventListener('input', clearCalendarError);
+  calendarURL.addEventListener('paste', e => {
+    const value = e.clipboardData?.getData('text/plain');
+    const replacing = !calendarURL.value || (calendarURL.selectionStart === 0 && calendarURL.selectionEnd === calendarURL.value.length);
+    if (value && value !== value.trim() && replacing) {
+      e.preventDefault();
+      calendarURL.value = value.trim();
+      clearCalendarError();
+    }
+  });
   calendarForm.addEventListener('submit', e => {
     e.preventDefault();
-    const url = calendarForm.elements.url.value.trim(), classId = calendarForm.elements.classId.value;
-    if (!url) { calendarForm.elements.url.focus(); return; }
-    calendarAction(async hooks => { await hooks.add(url, classId); calendarForm.elements.url.value = ''; });
+    const classId = calendarForm.elements.classId.value;
+    calendarFormAction(async hooks => {
+      await hooks.add(calendarURL.value, classId);
+      calendarURL.value = '';
+      calendarForm.elements.classId.value = '';
+    });
   });
   calendarList.addEventListener('click', e => {
     const button = e.target.closest('[data-calendar-action]');
-    if (!button) return;
-    calendarAction(hooks => hooks[button.dataset.calendarAction](button.dataset.id));
+    if (button && !button.disabled) {
+      clearCalendarError();
+      window.CalendarUIHooks[button.dataset.calendarAction](button.dataset.id);
+    }
   });
   calendarUnmatched.addEventListener('click', e => {
-    if (e.target.closest('[data-calendar-action="assign"]')) calendarAction(hooks => hooks.assign($('#calendar-assign-class').value));
+    const button = e.target.closest('[data-calendar-action="assign"]');
+    if (button && !button.disabled) window.CalendarUIHooks.assign($('#calendar-assign-class').value);
   });
-  $('#calendar-import').addEventListener('click', () => calendarAction(hooks => hooks.importFile(calendarForm.elements.classId.value)));
+  calendarSkipped.addEventListener('toggle', refreshCalendars);
+  calendarNotices.addEventListener('click', e => {
+    const button = e.target.closest('[data-notice-index]');
+    if (button) {
+      const note = S.calendarSkipped[+button.dataset.noticeIndex];
+      window.CalendarUIHooks.importNotice(note.feedId, note.uid, note.occurrence);
+    }
+  });
+  $('#calendar-import').addEventListener('click', () => {
+    const classId = calendarForm.elements.classId.value;
+    calendarFormAction(hooks => hooks.importFile(classId));
+  });
   $('#calendar-close').addEventListener('click', () => calendarsDlg.close());
   calendarsDlg.addEventListener('close', syncNative);
 
@@ -1192,7 +1312,7 @@
   const summary = d => (d.classes.length === 1 ? '1 class' : d.classes.length + ' classes') + ', ' + plural(d.items.length, 'item');
 
   async function exportData() {
-    await call('export', { json: JSON.stringify(C.serialize(S), null, 2), filename: 'Lectures ' + today + '.json' });
+    await call('export', { json: JSON.stringify(C.serialize(S), null, 2), filename: 'Grod ' + today + '.json' });
   }
 
   async function importData() {
@@ -1201,7 +1321,7 @@
     let data = null;
     try { data = C.normalize(JSON.parse(file.text)); } catch (_) { data = null; }
     if (!data) {
-      await call('alert', { title: '“' + file.name + '” can’t be imported.', message: 'It isn’t a Lectures backup.' });
+      await call('alert', { title: '“' + file.name + '” can’t be imported.', message: 'It isn’t a Grod backup.' });
       return;
     }
     if (S.classes.length || S.items.length) {
@@ -1214,7 +1334,7 @@
     }
     view.center = true;
     view.renaming = null;
-    commit('Import', () => { S.classes = data.classes; S.items = data.items; S.calendars = data.calendars; S.calendarUnmatched = data.calendarUnmatched; });
+    commit('Import', () => restore(data));
     toast('Imported ' + summary(data));
   }
 
@@ -1304,12 +1424,14 @@
     if (boot && typeof boot.data === 'string') {
       try {
         const d = C.normalize(JSON.parse(boot.data));
-        if (d) S = { classes: d.classes, items: d.items, calendars: d.calendars, calendarUnmatched: d.calendarUnmatched, settings: d.settings };
+        if (d) {
+          restore(d);
+          S.settings = d.settings;
+        }
       } catch (_) { /* Swift has already set an unreadable file aside. */ }
     }
     ready = true;
     render();
-    call('ready').catch(() => {});
     window.Calendar.start({ state: () => S, call, snapshot, changed(before, label) {
       if (snapshot() === before) return;
       undoStack.push({ label, data: before });
@@ -1318,5 +1440,6 @@
       persist();
       render();
     } });
+    call('ready').catch(() => {});
   })();
 })();

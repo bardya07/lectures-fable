@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Lectures Fable</title>
+<title>Grod</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -68,8 +68,12 @@
   <h2 id="calendars-title">Calendars</h2>
   <div id="calendar-list"></div>
   <div id="calendar-unmatched" hidden></div>
-  <form id="calendar-form" autocomplete="off">
-    <label class="field"><span>URL</span><input type="text" name="url" placeholder="https://" spellcheck="false" autocapitalize="off"></label>
+  <details id="calendar-skipped" hidden>
+    <summary></summary>
+    <div id="calendar-notices"></div>
+  </details>
+  <form id="calendar-form" autocomplete="off" novalidate>
+    <label class="field"><span>URL</span><input type="url" name="url" placeholder="https://" spellcheck="false" autocapitalize="off" autofocus></label>
     <label class="field"><span>Class</span><select name="classId"></select></label>
     <div id="calendar-error" role="alert" hidden></div>
     <footer>

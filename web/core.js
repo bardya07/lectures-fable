@@ -1,9 +1,10 @@
-/* Lectures Fable: model and layout logic. No DOM, so it also runs under node for tests. */
+/* Grod: model and layout logic. No DOM, so it also runs under node for tests. */
 (function (root) {
   'use strict';
 
   const DAY_MS = 86400000;
   const TYPES = ['lecture', 'assignment', 'exam'];
+  const CALENDAR_FIELDS = ['classId', 'type', 'title', 'date', 'link'];
   const VIEWS = ['timeline', 'compact'];
   const THEMES = ['system', 'dark', 'light'];
   // The timeline always covers this academic year and grows to fit anything outside it.
@@ -112,7 +113,8 @@
           TYPES.includes(original.type) && typeof original.title === 'string' && isISO(original.date) && typeof original.link === 'string') {
         item.calendar = { feedId: cal.feedId, uid: cal.uid, occurrence: cal.occurrence,
           original: { classId: original.classId, type: original.type, title: original.title.slice(0, 200), date: original.date, link: original.link.slice(0, 2000) } };
-        if (Array.isArray(cal.edited)) item.calendar.edited = cal.edited.filter(f => ['classId', 'type', 'title', 'date', 'link'].includes(f));
+        if (Array.isArray(cal.edited)) item.calendar.edited = cal.edited.filter(f => CALENDAR_FIELDS.includes(f));
+        if (cal.includeNotice === true) item.calendar.includeNotice = true;
       }
       items.push(item);
     }
@@ -131,15 +133,25 @@
       calendars.push({ id: cal.id, url: cal.url.slice(0, 2000), classId: classIds.has(cal.classId) ? cal.classId : '',
         lastSynced: typeof cal.lastSynced === 'string' ? cal.lastSynced : '' });
     }
-    const calendarUnmatched = [];
-    for (const event of Array.isArray(src.calendarUnmatched) ? src.calendarUnmatched : []) {
-      if (!event || !(event.feedId === '' || calendarIds.has(event.feedId)) || typeof event.uid !== 'string' || !event.uid ||
-          typeof event.occurrence !== 'string' || !isISO(event.date)) continue;
-      calendarUnmatched.push({ feedId: event.feedId, uid: event.uid, occurrence: event.occurrence,
-        title: typeof event.title === 'string' ? event.title.slice(0, 200) : '', type: TYPES.includes(event.type) ? event.type : calendarType(event.title), date: event.date,
-        link: typeof event.link === 'string' ? event.link.slice(0, 2000) : '' });
+    function calendarEntries(entries, skipped) {
+      const result = [];
+      for (const event of Array.isArray(entries) ? entries : []) {
+        if (!event || !(event.feedId === '' || calendarIds.has(event.feedId)) || typeof event.uid !== 'string' || !event.uid ||
+            typeof event.occurrence !== 'string' || !isISO(event.date)) continue;
+        const inferred = TYPES.includes(event.type) ? event.type : calendarType(event.title);
+        const entry = { feedId: event.feedId, uid: event.uid, occurrence: event.occurrence,
+          title: typeof event.title === 'string' ? event.title.slice(0, 200) : '',
+          type: inferred === 'skip' ? 'lecture' : inferred, date: event.date,
+          link: typeof event.link === 'string' ? event.link.slice(0, 2000) : '' };
+        if (event.includeNotice === true) entry.includeNotice = true;
+        if (skipped) entry.classId = classIds.has(event.classId) ? event.classId : '';
+        result.push(entry);
+      }
+      return result;
     }
-    return { classes, items, settings, calendars, calendarUnmatched, dropped };
+    return { classes, items, settings, calendars,
+      calendarUnmatched: calendarEntries(src.calendarUnmatched, false),
+      calendarSkipped: calendarEntries(src.calendarSkipped, true), dropped };
   }
 
   function nextColor(used) {
@@ -148,7 +160,8 @@
   }
 
   function serialize(state) {
-    return { app: 'lectures-fable', version: 1, classes: state.classes, items: state.items, settings: state.settings, calendars: state.calendars || [], calendarUnmatched: state.calendarUnmatched || [] };
+    return { app: 'lectures-fable', version: 1, classes: state.classes, items: state.items, settings: state.settings,
+      calendars: state.calendars || [], calendarUnmatched: state.calendarUnmatched || [], calendarSkipped: state.calendarSkipped || [] };
   }
 
   // ---------------------------------------------------------------- derived facts
@@ -173,10 +186,7 @@
   }
 
   function title(item, nums) {
-    if (item.type === 'lecture') {
-      const n = 'Lecture ' + (nums.get(item.id) || '');
-      return item.title ? n + ' · ' + item.title : n;
-    }
+    if (item.type === 'lecture') return item.title || 'Lecture ' + (nums.get(item.id) || '');
     return item.title || (item.type === 'exam' ? 'Exam' : 'Assignment');
   }
 
@@ -303,43 +313,128 @@
   function icsLocalDate(spec, day) {
     return spec.time ? localISO(new Date(icsInstant(spec, day))) : day;
   }
-  function calendarType(summary) {
-    const s = String(summary || '');
-    if (/\b(exam|midterm|final|quiz)\b/i.test(s)) return 'exam';
-    if (/\b(assignment|due|homework|hw|lab\s+report|problem\s+set|submission)\b/i.test(s)) return 'assignment';
-    return 'lecture';
+  const calendarWords = {
+    exam: /\b(?:exams?|midterms?|finals?|quiz(?:zes)?|tests?|assessments?)\b/i,
+    assignment: /\b(?:assignments?|due|homeworks?|hw\d*|problem\s+sets?|ps\d*|lab\s+reports?|essays?|papers?|reports?|projects?|submissions?|worksheets?|podcasts?|presentations?|reflections?)\b/i,
+    lecture: /\b(?:lectures?|lec\d*|class(?:es)?|seminars?|tutorials?)\b/i,
+  };
+  const strongExam = /\b(?:exams?|midterms?|quiz(?:zes)?|tests?|assessments?)\b/i;
+  const calendarNotice = /\b(?:cancel(?:l)?ed|cancellations?|no\s+(?:classes?|lectures?|tutorials?|labs?)|cut[\s-]?off|campus closed)\b/i;
+  const calendarHoliday = /(?:^|[-–—]\s*)(?:(?:public|statutory|university)\s+)?(?:holiday|remembrance day|thanksgiving(?: day)?|reading (?:day|break|week)|spring break|winter break|(?:labou?r|family|victoria|canada|independence|memorial|christmas|boxing|new year['’]s) day|good friday)\s*$/i;
+
+  function calendarType(event) {
+    if (!event || typeof event === 'string') event = { title: event || '' };
+    const { allDay, recurring, duration, date, uid = '', status = '', description = '', categories = '', link = '' } = event;
+    const summary = String(event.title || '').replace(/\[[^\]]*\]/g, '');
+    const urlInText = /https?:\/\/[^\s<>"']+/gi;
+    const urls = [link, ...(description.match(urlInText) || [])];
+    const descriptionText = description.replace(urlInText, '').replace(/<[^>]*>/g, ' ');
+    const scores = { lecture: 0, assignment: 0, exam: 0, skip: 0 };
+    const club = /\bhomework\s+club\b/i;
+    if (calendarNotice.test(summary) || calendarHoliday.test(summary.trim()) || /^cancelled$/i.test(status) || /\bholidays?\b/i.test(categories)) scores.skip += 150;
+    if (/\breview\s+sessions?\b/i.test(summary) || club.test(summary)) scores.lecture += 100;
+    let title = summary.replace(club, '');
+    if (calendarWords.assignment.test(title)) title = title.replace(/\bfinals?\b/gi, '');
+    const sources = [[title, 14], [categories, 6], [descriptionText.replace(club, ''), 3]];
+    for (const [value, weight] of sources) {
+      for (const type of TYPES) {
+        if (calendarWords[type].test(value)) scores[type] += type === 'lecture' ? Math.ceil(weight / 2) : weight;
+      }
+      if (!allDay && /\blabs?\b/i.test(value) && !/\blab\s+reports?\b/i.test(value)) scores.lecture += Math.ceil(weight / 2);
+    }
+    if (strongExam.test(title)) scores.exam += 32;
+    else if (calendarWords.exam.test(title)) scores.exam += 10;
+    if (urls.some(url => /\/quizzes(?:\/|[?#]|$)/i.test(url)) || /^event-quiz-/i.test(uid)) scores.exam += 10;
+    if (urls.some(url => /\/assignments(?:\/|[?#]|$)/i.test(url))) scores.assignment += 6;
+    if (/^event-assignment-/i.test(uid)) scores.assignment += 7;
+    if (/^event-calendar-event-/i.test(uid)) scores.lecture += 1;
+    if (allDay) scores.assignment += 2;
+    if (!allDay && duration === 0 && /\b(?:due|deadline|submission)\b/i.test(summary + ' ' + descriptionText)) scores.assignment += 4;
+    if (!allDay && recurring) scores.lecture += 5;
+    // Common end-of-term months. Duration is a tiebreaker for untitled or ambiguous events.
+    if (!allDay && !recurring && duration >= 120 && duration <= 300
+        && date && /-(?:04|08|12)-(?:0[5-9]|1[0-9]|2[0-4])$/.test(date)) scores.exam += 4;
+    const highest = Math.max(...Object.values(scores));
+    const winners = Object.keys(scores).filter(type => scores[type] === highest);
+    return winners.length === 1 ? winners[0] : 'lecture';
   }
+
   function matchCalendarClass(summary, classes) {
     const canonical = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    const text = ' ' + canonical(summary) + ' ';
-    const compact = text.replace(/\b([a-z]{2,8})\s+(\d{2,4}[a-z]?)\b/g, '$1$2');
-    for (const c of classes || []) {
-      const name = canonical(c.name);
-      if (name && text.includes(' ' + name + ' ')) return c.id;
-      const codes = name.match(/\b[a-z]{2,8}\s*\d{2,4}[a-z]?\b/g) || [];
-      if (codes.some(code => compact.includes(' ' + code.replace(/\s/g, '') + ' '))) return c.id;
-    }
-    return null;
+    const codes = s => (canonical(s).match(/\b[a-z]{2,8}\s*\d{2,4}[a-z]?\b/g) || []).map(code => code.replace(/\s/g, ''));
+    const candidates = (classes || []).map(c => ({ id: c.id, name: canonical(c.name), codes: codes(c.name) }));
+    const title = String(summary || '').replace(/\[[^\]]*\]/g, bracket =>
+      bracket.replace(/\b([a-z]+\s*\d{2,4}[a-z]?)\s+[a-z]\d{2,4}\b/gi, '$1'));
+    const matchCode = list => {
+      for (const code of list) {
+        const match = candidates.find(c => c.codes.includes(code));
+        if (match) return match.id;
+      }
+      return null;
+    };
+    const bracketCode = matchCode(Array.from(title.matchAll(/\[([^\]]*)\]/g)).flatMap(match => codes(match[1])));
+    if (bracketCode) return bracketCode;
+    const text = ' ' + canonical(title) + ' ';
+    const named = candidates.find(c => c.name && text.includes(' ' + c.name + ' '));
+    return named ? named.id : matchCode(codes(title));
   }
-  function parseICS(text) {
-    const lines = String(text || '').replace(/\r\n[ \t]|\n[ \t]|\r[ \t]/g, '').split(/\r\n|\n|\r/);
+
+  function icsDuration(start, end, duration) {
+    if (!start.time) return null;
+    if (end && end.time) return (icsInstant(end, end.day) - icsInstant(start, start.day)) / 60000;
+    if (duration) {
+      const parts = /^\+?P(?:(\d+)W|(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$/i.exec(duration);
+      if (parts) return +(parts[1] || 0) * 10080 + +(parts[2] || 0) * 1440 + +(parts[3] || 0) * 60
+        + +(parts[4] || 0) + +(parts[5] || 0) / 60;
+    }
+    return 0;
+  }
+
+  function parseICS(text, strict) {
+    const lines = String(text || '').trim().replace(/\r\n[ \t]|\n[ \t]|\r[ \t]/g, '').split(/\r\n|\n|\r/);
+    if (strict && (!/^BEGIN:VCALENDAR$/i.test(lines[0]) || !/^END:VCALENDAR$/i.test(lines[lines.length - 1]))) {
+      throw new Error('Invalid calendar file.');
+    }
     const events = [];
+    const overrides = new Map();
+    const occurrences = new Map();
+    const occurrenceKey = (uid, spec, day) => JSON.stringify([uid, spec.time ? icsInstant(spec, day) : day]);
     let props = null, componentDepth = 0;
+    const components = [];
     const addEvent = p => {
       const first = name => (p[name] || [])[0];
+      const value = name => (first(name) || {}).value;
       const start = first('DTSTART');
       const uidProp = first('UID');
-      const spec = start && icsDate(start.value, start.params);
+      const recurrenceId = first('RECURRENCE-ID');
+      const original = recurrenceId && icsDate(recurrenceId.value, recurrenceId.params);
+      const spec = start ? icsDate(start.value, start.params) : original;
       const uidValue = uidProp && icsText(uidProp.value).trim();
-      if (!spec || !uidValue) return;
-      const summary = first('SUMMARY');
-      const title = icsText(summary && summary.value).trim().slice(0, 200);
-      const url = first('URL'), description = first('DESCRIPTION');
-      const descriptionText = icsText(description && description.value);
+      if (!spec || !uidValue || (recurrenceId && !original)) {
+        if (strict) throw new Error('Invalid calendar event.');
+        return;
+      }
+      const title = icsText(value('SUMMARY')).trim();
+      const descriptionText = icsText(value('DESCRIPTION'));
       const match = descriptionText.match(/https?:\/\/[^\s<>"']+/i);
-      const link = icsText(url && url.value).trim() || (match ? match[0].replace(/[.,;]+$/, '') : '');
+      const link = icsText(value('URL')).trim() || (match ? match[0].replace(/[.,;]+$/, '') : '');
+      const categories = (p.CATEGORIES || []).map(category => icsText(category.value)).join(', ');
+      const end = first('DTEND');
+      const duration = icsDuration(spec, end && icsDate(end.value, end.params), value('DURATION'));
       const rrule = first('RRULE');
-      const emit = (day, recurring) => events.push({ uid: uidValue, title, date: icsLocalDate(spec, day), link: link.slice(0, 2000), occurrence: recurring ? day : '' });
+      const emit = (day, recurring) => {
+        const date = icsLocalDate(spec, day);
+        const type = calendarType({ uid: uidValue, title, date, link, description: descriptionText, categories,
+          allDay: !spec.time, recurring: recurring || !!original, duration, status: value('STATUS') });
+        const event = { uid: uidValue, title: title.slice(0, 200), date, link: link.slice(0, 2000),
+          occurrence: original ? original.day : recurring ? day : '', type };
+        if (original) {
+          overrides.set(occurrenceKey(uidValue, original, original.day), event);
+        } else {
+          if (recurring) occurrences.set(event, occurrenceKey(uidValue, spec, day));
+          events.push(event);
+        }
+      };
       if (!rrule) { emit(spec.day, false); return; }
       const rule = {};
       for (const part of rrule.value.split(';')) {
@@ -378,6 +473,15 @@
       }
     };
     for (const line of lines) {
+      if (strict) {
+        const component = /^(BEGIN|END):(.+)$/i.exec(line);
+        if (component) {
+          const name = component[2].toUpperCase();
+          if (component[1].toUpperCase() === 'BEGIN') components.push(name);
+          else if (components.pop() !== name) throw new Error('Invalid calendar file.');
+        }
+        if (components.length === 0 && !/^END:VCALENDAR$/i.test(line)) throw new Error('Invalid calendar file.');
+      }
       if (/^BEGIN:VEVENT$/i.test(line)) { props = {}; componentDepth = 0; continue; }
       if (!props) continue;
       if (/^BEGIN:/i.test(line)) { componentDepth++; continue; }
@@ -391,7 +495,18 @@
       for (const param of parameters) { const at = param.indexOf('='); if (at > 0) params[param.slice(0, at).toUpperCase()] = param.slice(at + 1); }
       (props[name] || (props[name] = [])).push({ value: line.slice(colon + 1), params });
     }
-    return events;
+    if (strict && components.length) throw new Error('Invalid calendar file.');
+    if (!overrides.size) return events;
+    // Recurrence exceptions replace the generated instance regardless of their order in the file.
+    const result = events.map(event => {
+      const key = occurrences.get(event);
+      const override = overrides.get(key);
+      if (!override) return event;
+      overrides.delete(key);
+      override.occurrence = event.occurrence;
+      return override;
+    });
+    return result.concat(Array.from(overrides.values()));
   }
 
   // ---------------------------------------------------------------- layout
@@ -498,23 +613,20 @@
     return 1;
   }
 
-  // base: {classId, type, title, link}. Lectures never double up on a day; assignments get numbered.
+  // Lectures never double up on a day. Named assignment series use the existing numbered titles.
   function addSeries(state, base, dates, opt) {
     const taken = new Set(state.items.filter(it => it.classId === base.classId && it.type === 'lecture').map(it => it.date));
     const added = [];
-    let k = 0;
     for (const date of dates) {
       if (base.type === 'lecture' && taken.has(date)) continue;
-      k++;
-      const item = {
+      const suffix = ' ' + (added.length + 1);
+      const item = Object.assign({}, base, {
         id: uid(),
-        classId: base.classId,
-        type: base.type,
-        title: base.type === 'lecture' ? '' : (base.title || 'Assignment') + ' ' + k,
+        title: base.type === 'assignment' && base.title ? base.title.slice(0, 200 - suffix.length) + suffix : base.title,
         date,
-        done: !!(opt && opt.donePast && date < opt.today),
-        link: base.link || '',
-      };
+        done: !!(base.done && opt && date < opt.today),
+      });
+      taken.add(date);
       state.items.push(item);
       added.push(item);
     }
@@ -565,7 +677,7 @@
   }
 
   Object.assign(Core, {
-    TYPES, VIEWS, THEMES, RANGE_START, RANGE_END, RANGE_MIN, RANGE_MAX, COLOR_COUNT, WEEKDAYS,
+    TYPES, CALENDAR_FIELDS, VIEWS, THEMES, RANGE_START, RANGE_END, RANGE_MIN, RANGE_MAX, COLOR_COUNT, WEEKDAYS,
     isISO, addDays, diffDays, weekday, mondayOf, todayISO, dayOfMonth, fmtDay, fmtShort, fmtMedium, relative,
     uid, sorted, normalize, serialize, lectureNumbers, status, title, stats, upcoming, range, months, recurrence,
     weekIndex, weekDate, layoutWeeks, layoutRow, compact, classLectures, addClass, removeClass, moveClass, moveItemToWeek, addSeries, markThrough, markPastDone,

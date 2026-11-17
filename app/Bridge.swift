@@ -27,7 +27,7 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
             pageReady = true
             pageStateChanged()
             replyHandler(true, nil)
-            if let notice = store.notice { warn("Lectures Fable started without your data.", notice) }
+            if let notice = store.notice { warn("Grod started without your data.", notice) }
             selfTest?.start()
 
         case "save":
@@ -140,7 +140,7 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
     private func exportFile(json: String, suggestedName: String, reply: @escaping @MainActor (Any?, String?) -> Void) {
         let data = Data(json.utf8)
         guard Store.isUsable(data) else { reply(false, nil); return }
-        let name = suggestedName.isEmpty ? "Lectures.json" : (suggestedName as NSString).lastPathComponent
+        let name = suggestedName.isEmpty ? "Grod.json" : (suggestedName as NSString).lastPathComponent
 
         if selfTest != nil, let out = Launch.outputDirectory {
             let ok = (try? data.write(to: out.appendingPathComponent(name), options: .atomic)) != nil
@@ -193,61 +193,52 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
     // MARK: Calendars
 
     private func fetchCalendar(_ raw: String, reply: @escaping @MainActor (Any?, String?) -> Void) {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard var parts = URLComponents(string: value),
-              let scheme = parts.scheme?.lowercased(), ["https", "webcal"].contains(scheme),
-              let host = parts.host, !host.isEmpty else {
-            reply(nil, "Enter an HTTPS or webcal URL.")
-            return
-        }
-        parts.scheme = "https"
-        guard let url = parts.url else { reply(nil, "Invalid calendar URL."); return }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 20
-        let session = URLSession(configuration: configuration)
         Task { @MainActor in
-            defer { session.finishTasksAndInvalidate() }
             do {
-                let (data, response) = try await session.data(from: url)
-                guard let http = response as? HTTPURLResponse,
-                      http.url?.scheme?.lowercased() == "https" else {
-                    reply(nil, "Calendar connection failed.")
-                    return
-                }
-                guard (200...299).contains(http.statusCode) else {
-                    reply(nil, "Calendar unavailable (HTTP \(http.statusCode)).")
-                    return
-                }
-                guard data.count <= 20_000_000, let text = String(data: data, encoding: .utf8) else {
-                    reply(nil, "Calendar file is invalid or too large.")
-                    return
+                let url = try CalendarFetch.url(raw)
+                let text: String
+                if selfTest != nil {
+                    guard let fixture = Launch.calendarFixture, url.host == "calendar.example.test" else {
+                        reply(["error": "Calendar not found."], nil)
+                        return
+                    }
+                    text = try CalendarFetch.decode(Data(contentsOf: fixture))
+                } else {
+                    text = try await CalendarFetch.fetch(url)
                 }
                 reply(["text": text], nil)
             } catch {
-                let message = (error as? URLError)?.code == .timedOut ? "Calendar request timed out." : "Couldn’t fetch calendar."
-                reply(nil, message)
+                reply(["error": CalendarFetch.message(for: error)], nil)
             }
         }
     }
 
     private func importCalendar(reply: @escaping @MainActor (Any?, String?) -> Void) {
+        if selfTest != nil {
+            guard let fixture = Launch.calendarFixture else { reply(NSNull(), nil); return }
+            readCalendar(fixture, reply: reply)
+            return
+        }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "ics") ?? .data]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { reply(NSNull(), nil); return }
-            do {
-                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size <= 20_000_000 else { throw CocoaError(.fileReadTooLarge) }
-                let data = try Data(contentsOf: url)
-                guard let text = String(data: data, encoding: .utf8) else { throw CocoaError(.fileReadInapplicableStringEncoding) }
-                reply(["name": url.lastPathComponent, "text": text], nil)
-            } catch {
-                reply(nil, "Couldn’t open calendar file.")
-            }
+            self.readCalendar(url, reply: reply)
         }
     }
 
+    private func readCalendar(_ url: URL, reply: @escaping @MainActor (Any?, String?) -> Void) {
+        do {
+            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard size <= CalendarFetch.maxBytes else { throw CalendarFetch.Failure.tooLarge }
+            let text = try CalendarFetch.decode(Data(contentsOf: url))
+            reply(["text": text], nil)
+        } catch let error as CalendarFetch.Failure {
+            reply(["error": error.localizedDescription], nil)
+        } catch {
+            reply(["error": "Couldn’t open calendar file."], nil)
+        }
+    }
 }
