@@ -27,7 +27,7 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
             pageReady = true
             pageStateChanged()
             replyHandler(true, nil)
-            if let notice = store.notice { warn("Grod started without your data.", notice) }
+            if let notice = store.notice { warn("Grod data file", notice) }
             selfTest?.start()
 
         case "save":
@@ -48,6 +48,11 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
             page.redoLabel = text("redoLabel")
             page.textFocused = body["text"] as? Bool ?? false
             page.modal = body["modal"] as? Bool ?? false
+            let appearance = text("theme")
+            if ["system", "dark", "light"].contains(appearance), appearance != theme {
+                theme = appearance
+                applyTheme()
+            }
             pageStateChanged()
             replyHandler(true, nil)
 
@@ -81,6 +86,10 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
 
         case "import":
             importFile(reply: replyHandler)
+
+        case "backUpBeforeImport":
+            do { try store.backUpBeforeImport(); replyHandler(true, nil) }
+            catch { replyHandler(nil, error.localizedDescription) }
 
         case "calendarFetch":
             fetchCalendar(text("url"), reply: replyHandler)
@@ -166,11 +175,8 @@ extension AppDelegate: WKScriptMessageHandlerWithReply {
     private func importFile(reply: @escaping @MainActor (Any?, String?) -> Void) {
         let read: (URL) -> Void = { [self] url in
             do {
-                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size <= 20_000_000 else { throw CocoaError(.fileReadTooLarge) }
-                let data = try Data(contentsOf: url)
-                store.backUpBeforeImport()
-                reply(["name": url.lastPathComponent, "text": String(decoding: data, as: UTF8.self)], nil)
+                let text = try Store.readBackup(at: url)
+                reply(["name": url.lastPathComponent, "text": text], nil)
             } catch {
                 warn("“\(url.lastPathComponent)” couldn’t be opened.", error.localizedDescription)
                 reply(NSNull(), nil)

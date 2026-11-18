@@ -23,6 +23,8 @@ private final class FixtureProtocol: URLProtocol {
             status = 302
             headers["Location"] = "http://calendar.example.test/fixture"
         case "/invalid": data = Data([0xFF])
+        case "/oversized": headers["Content-Length"] = String(CalendarFetch.maxBytes + 1)
+        case "/stream": data = Data(count: CalendarFetch.maxBytes + 1)
         case "/timeout":
             client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
             return
@@ -74,6 +76,8 @@ struct CalendarFetchTests {
             ("/unavailable", "Calendar unavailable (HTTP 503)."),
             ("/redirect", "Calendar must use HTTPS."),
             ("/invalid", "Calendar file isn’t UTF-8."),
+            ("/oversized", "Calendar file is too large."),
+            ("/stream", "Calendar file is too large."),
             ("/timeout", "Calendar request timed out."),
             ("/offline", "No internet connection."),
         ] {

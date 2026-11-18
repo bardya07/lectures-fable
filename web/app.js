@@ -34,33 +34,43 @@
   const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.app;
   const STORAGE_KEY = 'lectures-fable';
 
-  function call(op, payload) {
-    if (window.__testBridge && op in window.__testBridge) return Promise.resolve(window.__testBridge[op](payload || {}));
+  async function call(op, payload) {
+    if (window.__testBridge && op in window.__testBridge) return window.__testBridge[op](payload || {});
     if (native) return native.postMessage(Object.assign({ op }, payload));
-    return Promise.resolve(browserFallback(op, payload || {}));
+    return browserFallback(op, payload || {});
   }
 
   function browserFallback(op, p) {
     switch (op) {
       case 'load': return { data: localStorage.getItem(STORAGE_KEY) };
       case 'save': localStorage.setItem(STORAGE_KEY, p.json); return true;
+      case 'backUpBeforeImport': {
+        const current = localStorage.getItem(STORAGE_KEY);
+        if (current !== null) localStorage.setItem(STORAGE_KEY + '-before-import', current);
+        return true;
+      }
       case 'open': window.open(p.url, '_blank', 'noopener'); return true;
       case 'confirm': return window.confirm(p.title + (p.message ? '\n\n' + p.message : ''));
-      case 'alert': window.alert(p.title); return true;
+      case 'alert': window.alert(p.title + (p.message ? '\n\n' + p.message : '')); return true;
       case 'export': {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([p.json], { type: 'application/json' }));
         a.download = p.filename;
         a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 0);
         return true;
       }
       case 'calendarFetch': throw new Error('Calendar fetch requires the app.');
       case 'calendarImport':
-      case 'import': return new Promise(resolve => {
+      case 'import': return new Promise((resolve, reject) => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = op === 'calendarImport' ? '.ics,text/calendar' : '.json,application/json';
-        input.onchange = async () => resolve(input.files[0] ? { name: input.files[0].name, text: await input.files[0].text() } : null);
+        input.oncancel = () => resolve(null);
+        input.onchange = async () => {
+          try { resolve(input.files[0] ? { name: input.files[0].name, text: await input.files[0].text() } : null); }
+          catch (error) { reject(error); }
+        };
         input.click();
       });
       default: return null;
@@ -68,7 +78,7 @@
   }
 
   // ---------------------------------------------------------------- state
-  let S = { classes: [], items: [], calendars: [], calendarUnmatched: [], calendarSkipped: [], settings: { view: 'timeline', theme: 'system' } };
+  let S = { classes: [], items: [], calendars: [], calendarUnmatched: [], calendarSkipped: [], calendarTombstones: [], settings: { view: 'timeline', theme: 'system' } };
   let today = C.todayISO();
   let nums = new Map();
   let stat = new Map();
@@ -85,21 +95,24 @@
 
   const find = id => S.items.find(it => it.id === id);
   const classOf = id => S.classes.find(c => c.id === id);
-  const snapshot = () => JSON.stringify({ classes: S.classes, items: S.items, calendars: S.calendars,
-    calendarUnmatched: S.calendarUnmatched, calendarSkipped: S.calendarSkipped });
+  const snapshot = (withSettings = false, state = S) => JSON.stringify({ classes: state.classes, items: state.items, calendars: state.calendars,
+    calendarUnmatched: state.calendarUnmatched, calendarSkipped: state.calendarSkipped, calendarTombstones: state.calendarTombstones,
+    settings: withSettings ? state.settings : undefined });
   function restore(d) {
     S.classes = d.classes;
     S.items = d.items;
     S.calendars = d.calendars || [];
     S.calendarUnmatched = d.calendarUnmatched || [];
     S.calendarSkipped = d.calendarSkipped || [];
+    S.calendarTombstones = d.calendarTombstones || [];
+    if (d.settings) { S.settings = d.settings; view.center = true; }
   }
 
   // Every change to classes or items goes through here so it is saved and can be undone.
-  function commit(label, change) {
-    const before = snapshot();
+  function commit(label, change, withSettings = false) {
+    const before = snapshot(withSettings);
     const result = change();
-    if (snapshot() === before) return result;
+    if (snapshot(withSettings) === before) return result;
     undoStack.push({ label, data: before });
     if (undoStack.length > 200) undoStack.shift();
     redoStack.length = 0;
@@ -112,8 +125,9 @@
   function step(from, to) {
     const entry = from.pop();
     if (!entry) return false;
-    to.push({ label: entry.label, data: snapshot() });
-    restore(JSON.parse(entry.data));
+    const data = JSON.parse(entry.data);
+    to.push({ label: entry.label, data: snapshot(!!data.settings) });
+    restore(data);
     view.renaming = null;
     hideToast();
     persist();
@@ -123,9 +137,15 @@
   const undo = () => step(undoStack, redoStack);
   const redo = () => step(redoStack, undoStack);
 
+  let savingBlocked = false, saveFailureShown = false;
   function persist() {
-    if (!ready) return;
-    call('save', { json: JSON.stringify(C.serialize(S), null, 2) }).catch(() => {});
+    if (!ready || savingBlocked) return;
+    call('save', { json: JSON.stringify(C.serialize(S), null, 2) }).then(() => { saveFailureShown = false; }).catch(error => {
+      if (!native && !saveFailureShown) {
+        saveFailureShown = true;
+        call('alert', { title: 'Your changes couldn’t be saved.', message: error.message });
+      }
+    });
   }
 
   // ---------------------------------------------------------------- chips
@@ -334,11 +354,17 @@
 
   // ---------------------------------------------------------------- render
   function render() {
+    const previous = layout;
+    const previousDay = today;
+    const active = document.activeElement;
+    const draft = active?.matches('#new-class-input, #rename-input') ? {
+      id: active.id, classId: active.closest('.row')?.dataset.class, start: active.selectionStart, end: active.selectionEnd,
+    } : null;
     today = C.todayISO();
     nums = C.lectureNumbers(S);
     stat = C.stats(S, today);
     hideCard();
-    ghost.remove();
+    hideGhost();
     const x = scroller.scrollLeft, y = scroller.scrollTop;
     rendering = true;
     scroller.classList.toggle('timeline', S.settings.view === 'timeline');
@@ -358,10 +384,27 @@
     scroller.scrollLeft = x;
     scroller.scrollTop = y;
     lastScrollLeft = scroller.scrollLeft;
-    if (view.center) { view.center = false; scrollToNow(false); }
-    if (!dlg.open) {
+    if (view.center || (followToday && (previousDay !== today || previous.nowX !== layout.nowX))) {
+      view.center = false;
+      scrollToNow(false);
+    } else if (previous.R && layout.R && previous.R.start !== layout.R.start) {
+      const weeks = C.diffDays(previous.R.start, layout.R.start) / 7;
+      moveHorizontally((Math.round(x / previous.weekWidth) + weeks) * WEEK_W, false);
+    }
+    if (!dlg.open && !calendarsDlg.open) {
       const input = view.renaming ? $('#rename-input') : $('#new-class-input');
-      if (input) { input.focus({ preventScroll: true }); if (view.renaming) input.select(); }
+      if (input) {
+        if (draft && draft.id === input.id && draft.classId === input.closest('.row')?.dataset.class) {
+          input.replaceWith(active);
+          active.focus({ preventScroll: true });
+          active.setSelectionRange(draft.start, draft.end);
+        } else {
+          input.focus({ preventScroll: true });
+          if (view.renaming) input.select();
+        }
+      } else if (active?.classList.contains('chip')) {
+        chipEl(active.dataset.id)?.focus({ preventScroll: true });
+      }
     }
     syncNative();
   }
@@ -385,9 +428,9 @@
     followToday = true;
     if (layout.view === 'timeline') {
       const visibleWeeks = Math.round((scroller.clientWidth - SIDE_W) / WEEK_W);
-      const left = Math.max(0, C.weekIndex(today, layout.R.start) - visibleWeeks + 2) * WEEK_W;
+      const left = Math.max(0, C.weekIndex(today, layout.R.start) - Math.max(0, visibleWeeks - 2)) * WEEK_W;
       moveHorizontally(left, smooth);
-    } else scrollToX(layout.nowX, 0.66, smooth);
+    } else moveHorizontally(layout.nowX - trackViewport() * 0.66, smooth);
   }
 
   // Follow today after launch or Today; otherwise preserve the first visible week.
@@ -396,7 +439,10 @@
     const width = scroller.clientWidth;
     if (!ready || width === observedWidth) return;
     observedWidth = width;
-    if (layout.view !== 'timeline') return;
+    if (layout.view !== 'timeline') {
+      if (followToday) scrollToNow(false);
+      return;
+    }
     const firstWeek = Math.round(scroller.scrollLeft / WEEK_W);
     render();
     if (followToday) scrollToNow(false);
@@ -411,10 +457,10 @@
     if (!el) return false;
     const x = el.offsetLeft + el.offsetWidth / 2;
     if (x < scroller.scrollLeft + 30 || x > scroller.scrollLeft + trackViewport() - 30) scrollToX(x, 0.5, true);
-    const row = el.closest('.row');
     const headH = layout.view === 'timeline' ? HEAD_H : CP_HEAD;
-    if (row.offsetTop - headH < scroller.scrollTop) scroller.scrollTop = row.offsetTop - headH;
-    else if (row.offsetTop + row.offsetHeight > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = row.offsetTop + row.offsetHeight - scroller.clientHeight;
+    const bounds = scroller.getBoundingClientRect(), rect = el.getBoundingClientRect();
+    if (rect.top < bounds.top + headH) scroller.scrollTop += rect.top - bounds.top - headH;
+    else if (rect.bottom > bounds.top + scroller.clientHeight) scroller.scrollTop += rect.bottom - bounds.top - scroller.clientHeight;
     if (pulse) {
       el.classList.add('pulse');
       setTimeout(() => el.classList.remove('pulse'), 1500);
@@ -438,14 +484,20 @@
     if (it) commit(it.done ? 'Mark as Not Done' : 'Mark as Done', () => { it.done = !it.done; });
   }
 
+  async function openURL(url) {
+    try { if (await call('open', { url })) return; }
+    catch (_) { /* Report failed opens, including bridge failures. */ }
+    await call('alert', { title: 'This link couldn’t be opened.', message: url });
+  }
+
   function openLink(id) {
     const it = find(id);
-    if (it && it.link) call('open', { url: C.normalizeLink(it.link) }).catch(() => {});
+    if (it && it.link) openURL(C.normalizeLink(it.link));
   }
 
   function deleteItem(it, label = 'Delete') {
     const name = C.title(it, nums);
-    commit(label, () => { S.items = S.items.filter(x => x.id !== it.id); });
+    commit(label, () => C.removeItems(S, x => x.id === it.id));
     toast('Deleted ' + name);
   }
 
@@ -463,16 +515,18 @@
       }
       case 'delete': deleteItem(it); break;
       case 'delete-following': {
+        if (it.type !== 'lecture') return;
+        const classId = it.classId;
         const list = C.classLectures(S, it.classId);
-        const n = list.length - list.findIndex(x => x.id === id);
+        const approved = new Set(list.slice(list.findIndex(x => x.id === id)).map(x => x.id));
         const ok = await call('confirm', {
-          title: 'Delete ' + plural(n, 'lecture') + '?',
+          title: 'Delete ' + plural(approved.size, 'lecture') + '?',
           message: C.title(it, nums) + ' and everything after it in ' + classOf(it.classId).name + '.',
           confirm: 'Delete', destructive: true,
         });
-        if (!ok) return;
-        commit('Delete Lectures', () => C.removeFollowing(S, id));
-        toast('Deleted ' + plural(n, 'lecture'));
+        if (!ok || find(id)?.classId !== classId) return;
+        const n = commit('Delete Lectures', () => C.removeFollowing(S, id, approved));
+        if (n) toast('Deleted ' + plural(n, 'lecture'));
         break;
       }
     }
@@ -519,15 +573,17 @@
         break;
       }
       case 'delete': {
-        const n = S.items.filter(it => it.classId === classId).length;
-        if (n) {
+        let approved;
+        do {
+          approved = new Set(S.items.filter(it => it.classId === classId).map(it => it.id));
+          if (!approved.size) break;
           const ok = await call('confirm', {
             title: 'Delete ' + c.name + '?',
-            message: 'Its ' + plural(n, 'item') + ' will be deleted too.',
+            message: 'Its ' + plural(approved.size, 'item') + ' will be deleted too.',
             confirm: 'Delete', destructive: true,
           });
-          if (!ok) return;
-        }
+          if (!ok || classOf(classId) !== c) return;
+        } while (S.items.some(it => it.classId === classId && !approved.has(it.id)));
         commit('Delete Class', () => C.removeClass(S, classId));
         toast('Deleted ' + c.name);
         break;
@@ -833,7 +889,13 @@
       if (e.key === 'Enter') {
         e.preventDefault();
         const name = t.value.trim();
-        if (name) { view.addingClass = true; commit('Add Class', () => C.addClass(S, name)); scroller.scrollTop = scroller.scrollHeight; }
+        if (name) {
+          t.value = '';
+          delete t.dataset.typing;
+          view.addingClass = true;
+          commit('Add Class', () => C.addClass(S, name));
+          scroller.scrollTop = scroller.scrollHeight;
+        }
       } else if (e.key === 'Escape') {
         t.value = '';
         t.blur();
@@ -842,6 +904,10 @@
       if (e.key === 'Enter') { e.preventDefault(); finishRename(true); }
       else if (e.key === 'Escape') finishRename(false);
     }
+  });
+
+  grid.addEventListener('input', e => {
+    if (e.target.id === 'new-class-input') { e.target.dataset.typing = 'true'; syncNative(); }
   });
 
   grid.addEventListener('focusout', e => {
@@ -1075,7 +1141,7 @@
     // Imported items may be outside the normal add range; retain their week when editing.
     datePickerMin = it && v.date < C.RANGE_MIN ? C.mondayOf(v.date) : C.RANGE_MIN;
     datePickerMax = it && v.date > C.RANGE_MAX ? C.addDays(C.mondayOf(v.date), 6) : C.RANGE_MAX;
-    f.date.value = v.date;
+    f.date.value = v.date < datePickerMin ? datePickerMin : v.date > datePickerMax ? datePickerMax : v.date;
     f.until.min = C.RANGE_MIN;
     f.until.max = C.RANGE_MAX;
     renderDatePicker();
@@ -1097,19 +1163,19 @@
 
   // The dates a repeat would actually add (lectures never double up on a day).
   function seriesDates() {
-    let dates = C.recurrence(f.date.value, f.until.value, Array.from(repeatDays));
-    if (f.type.value === 'lecture') {
-      const taken = new Set(S.items.filter(it => it.classId === f.classId.value && it.type === 'lecture').map(it => it.date));
-      dates = dates.filter(d => !taken.has(d));
-    }
-    return dates;
+    const taken = f.type.value === 'lecture'
+      ? new Set(S.items.filter(it => it.classId === f.classId.value && it.type === 'lecture').map(it => it.date)) : null;
+    return C.recurrence(f.date.value, f.until.value, Array.from(repeatDays), taken);
   }
 
   function refreshForm() {
     const type = f.type.value;
     const series = isSeries();
     $('#repeat').hidden = !!editingId;
-    if (series && !f.until.value && C.isISO(f.date.value)) f.until.value = C.addDays(f.date.value, 13 * 7 - 1);
+    if (series && !f.until.value && C.isISO(f.date.value)) {
+      const suggested = C.addDays(f.date.value, 13 * 7 - 1);
+      f.until.value = suggested > datePickerMax ? datePickerMax : suggested;
+    }
     for (const b of weekdaysEl.children) b.setAttribute('aria-pressed', repeatDays.has(+b.dataset.wd));
     f.until.disabled = !series;
 
@@ -1181,14 +1247,14 @@
   });
   $('#link-open').addEventListener('click', () => {
     const url = C.normalizeLink(f.link.value);
-    if (url) call('open', { url }).catch(() => {});
+    if (url) openURL(url);
   });
   dlg.addEventListener('mousedown', e => {
     if (e.target !== dlg) return;
     const r = dlg.getBoundingClientRect();
     if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dlg.close();
   });
-  dlg.addEventListener('close', () => { editingId = null; syncNative(); });
+  dlg.addEventListener('close', () => { if (!dlg.open) editingId = null; syncNative(); });
 
   // ---------------------------------------------------------------- calendars
   const calendarsDlg = $('#calendars-dlg'), calendarForm = $('#calendar-form');
@@ -1298,7 +1364,7 @@
     const button = e.target.closest('[data-notice-index]');
     if (button) {
       const note = S.calendarSkipped[+button.dataset.noticeIndex];
-      window.CalendarUIHooks.importNotice(note.feedId, note.uid, note.occurrence);
+      if (note) window.CalendarUIHooks.importNotice(note);
     }
   });
   $('#calendar-import').addEventListener('click', () => {
@@ -1319,28 +1385,38 @@
     const file = await call('import');
     if (!file || typeof file.text !== 'string') return;
     let data = null;
-    try { data = C.normalize(JSON.parse(file.text)); } catch (_) { data = null; }
+    try { data = C.normalize(JSON.parse(file.text), S.settings); } catch (_) { data = null; }
     if (!data) {
       await call('alert', { title: '“' + file.name + '” can’t be imported.', message: 'It isn’t a Grod backup.' });
       return;
     }
-    if (S.classes.length || S.items.length) {
-      const ok = await call('confirm', {
-        title: 'Replace everything with “' + file.name + '”?',
-        message: 'It contains ' + summary(data) + '. Undo brings your current data back.',
-        confirm: 'Replace',
-      });
-      if (!ok) return;
-    }
+    let before;
+    do {
+      before = snapshot(true);
+      if (snapshot(true, data) === before) return;
+      if (S.classes.length || S.items.length || S.calendars.length || S.calendarUnmatched.length || S.calendarSkipped.length || data.dropped) {
+        const ok = await call('confirm', {
+          title: 'Replace everything with “' + file.name + '”?',
+          message: 'It contains ' + summary(data) + '. ' +
+            (data.dropped ? data.dropped + (data.dropped === 1 ? ' invalid entry' : ' invalid entries') + ' will be skipped. ' : '') +
+            'Undo brings your current data back.',
+          confirm: 'Replace',
+        });
+        if (!ok) return;
+      }
+      if (snapshot(true) === before) await call('backUpBeforeImport');
+    } while (snapshot(true) !== before);
     view.center = true;
     view.renaming = null;
-    commit('Import', () => restore(data));
+    commit('Import', () => restore(data), true);
     toast('Imported ' + summary(data));
   }
 
   // ---------------------------------------------------------------- commands from the menu bar and toolbar
   const textFocused = () => {
     const a = document.activeElement;
+    // The untouched new-class field receives automatic focus after deleting the last class.
+    if (a?.id === 'new-class-input' && !a.value && !a.dataset.typing) return false;
     return !!a && a.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(a.type);
   };
 
@@ -1381,8 +1457,8 @@
         case 'new-class': startNewClass(); break;
         case 'view': setView(arg); break;
         case 'today': scrollToNow(true); break;
-        case 'import': importData(); break;
-        case 'export': exportData(); break;
+        case 'import': importData().catch(error => call('alert', { title: 'Import failed.', message: error.message })); break;
+        case 'export': exportData().catch(error => call('alert', { title: 'Export failed.', message: error.message })); break;
         case 'calendars': openCalendars(); break;
         default: return false;
       }
@@ -1404,8 +1480,7 @@
       if (!e.metaKey && !e.ctrlKey) return;
       const k = e.key.toLowerCase();
       if (k === 'z' && !textFocused()) { e.preventDefault(); window.App.command(e.shiftKey ? 'redo' : 'undo'); }
-      else if (k === '1') { e.preventDefault(); setView('timeline'); }
-      else if (k === '2') { e.preventDefault(); setView('compact'); }
+      else if (k === '1' || k === '2') { e.preventDefault(); window.App.command('view', k === '1' ? 'timeline' : 'compact'); }
     });
   }
 
@@ -1419,27 +1494,38 @@
 
   // ---------------------------------------------------------------- start
   (async function start() {
-    let boot = null;
-    try { boot = await call('load'); } catch (_) { boot = null; }
-    if (boot && typeof boot.data === 'string') {
-      try {
+    let notice = '';
+    try {
+      const boot = await call('load');
+      if (!boot || !(boot.data === null || typeof boot.data === 'string')) throw new Error('Invalid load response.');
+      if (typeof boot.data === 'string') {
         const d = C.normalize(JSON.parse(boot.data));
-        if (d) {
-          restore(d);
-          S.settings = d.settings;
+        if (!d) throw new Error('Unrecognized data file.');
+        restore(d);
+        if (d.dropped) {
+          await call('backUpBeforeImport');
+          notice = d.dropped + (d.dropped === 1 ? ' invalid entry was' : ' invalid entries were') +
+            ' skipped. A backup contains the complete original data.';
         }
-      } catch (_) { /* Swift has already set an unreadable file aside. */ }
+      }
+    } catch (error) {
+      savingBlocked = true;
+      notice = 'Saving is disabled for this session to protect your stored data. ' + error.message;
     }
     ready = true;
     render();
-    window.Calendar.start({ state: () => S, call, snapshot, changed(before, label) {
+    window.Calendar.start({ state: () => S, call, snapshot, persist, async finishEditing() {
+      while (dlg.open) await new Promise(resolve => dlg.addEventListener('close', resolve, { once: true }));
+    }, changed(before, label) {
       if (snapshot() === before) return;
       undoStack.push({ label, data: before });
       if (undoStack.length > 200) undoStack.shift();
       redoStack.length = 0;
+      hideToast();
       persist();
       render();
     } });
     call('ready').catch(() => {});
+    if (notice) call('alert', { title: 'Grod data file', message: notice });
   })();
 })();

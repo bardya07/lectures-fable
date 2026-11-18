@@ -4,19 +4,11 @@
   const C = typeof module !== 'undefined' && module.exports ? require('./core.js') : root.Core;
   const key = e => JSON.stringify([e.uid, e.occurrence || '']);
   const fields = C.CALENDAR_FIELDS;
+  const entryFields = [...fields, 'includeNotice'];
 
   function editedFields(item) {
     return new Set([...(item.calendar.edited || []),
-      ...fields.filter(field => item[field] !== item.calendar.original[field])]);
-  }
-
-  function editItem(item, values) {
-    if (item.calendar) {
-      const edited = editedFields(item);
-      for (const field of fields) if (item[field] !== values[field]) edited.add(field);
-      item.calendar.edited = Array.from(edited);
-    }
-    Object.assign(item, values);
+      ...fields.filter(field => field !== 'type' && item[field] !== item.calendar.original[field])]);
   }
 
   function eventClass(state, feed, title) {
@@ -36,9 +28,16 @@
 
   function reconcile(state, feed, events) {
     const sameFeed = e => e.feedId === feed.id;
-    const existing = new Map(state.items.filter(i => i.calendar && sameFeed(i.calendar)).map(i => [key(i.calendar), i]));
+    const existing = new Map();
+    const seen = new Set((state.calendarTombstones || []).filter(sameFeed).map(key));
+    for (const item of state.items) {
+      if (item.calendarOrigin && sameFeed(item.calendarOrigin)) seen.add(key(item.calendarOrigin));
+      if (!item.calendar || !sameFeed(item.calendar)) continue;
+      const k = key(item.calendar);
+      if (!existing.has(k) || item.done || editedFields(item).size) existing.set(k, item);
+    }
     const allowedNotices = new Set((state.calendarUnmatched || []).filter(e => sameFeed(e) && e.includeNotice).map(key));
-    const seen = new Set(), kept = new Set();
+    const kept = new Set();
     const unmatched = [], skipped = [];
     for (const event of events) {
       const k = key(event);
@@ -53,35 +52,48 @@
       const entry = Object.assign({ feedId: feed.id, uid: event.uid, occurrence: event.occurrence || '' }, incoming);
       const keepNotice = allowedNotices.has(k) || (item && (item.calendar.includeNotice || item.done || edited.size > 0));
       if (type === 'skip' && !keepNotice) {
+        entry.classId = classId || '';
         skipped.push(entry);
         continue;
       }
       if (type === 'skip' || allowedNotices.has(k) || (item && item.calendar.includeNotice)) entry.includeNotice = true;
       if (!classId) {
+        delete entry.classId;
         unmatched.push(entry);
       } else if (item) {
         // Retain the previous type if a locally changed item becomes a notice.
         if (type === 'skip') incoming.type = item.calendar.original.type;
         for (const field of fields) if (!edited.has(field)) item[field] = incoming[field];
-        item.calendar.edited = Array.from(edited);
+        if (edited.size) item.calendar.edited = Array.from(edited);
         item.calendar.original = incoming;
         if (entry.includeNotice) item.calendar.includeNotice = true;
-        kept.add(k);
+        kept.add(item);
       } else {
-        state.items.push(importedItem(entry, classId));
-        kept.add(k);
+        const added = importedItem(entry, classId);
+        state.items.push(added);
+        kept.add(added);
       }
     }
     state.items = state.items.filter(item => {
-      if (!item.calendar || !sameFeed(item.calendar) || kept.has(key(item.calendar))) return true;
+      if (!item.calendar || !sameFeed(item.calendar) || kept.has(item)) return true;
       if (item.done || item.calendar.includeNotice || editedFields(item).size) {
+        if (!seen.has(key(item.calendar))) {
+          const { feedId, uid, occurrence } = item.calendar;
+          item.calendarOrigin = { feedId, uid, occurrence };
+        }
         delete item.calendar;
         return true;
       }
       return false;
     });
-    state.calendarUnmatched = (state.calendarUnmatched || []).filter(e => !sameFeed(e)).concat(unmatched);
-    state.calendarSkipped = (state.calendarSkipped || []).filter(e => !sameFeed(e)).concat(skipped);
+    function replaceEntries(entries, incoming) {
+      const previous = entries.filter(sameFeed);
+      if (previous.length === incoming.length && previous.every((entry, i) =>
+        key(entry) === key(incoming[i]) && entryFields.every(f => entry[f] === incoming[i][f]))) return entries;
+      return entries.filter(e => !sameFeed(e)).concat(incoming);
+    }
+    state.calendarUnmatched = replaceEntries(state.calendarUnmatched || [], unmatched);
+    state.calendarSkipped = replaceEntries(state.calendarSkipped || [], skipped);
   }
 
   function assign(state, classId) {
@@ -92,14 +104,16 @@
 
   function importNotice(state, feedId, uid, occurrence) {
     const skipped = state.calendarSkipped;
-    const index = skipped.findIndex(e => e.feedId === feedId && e.uid === uid && e.occurrence === occurrence);
+    // Different local files may contain the same UID. The dialog passes the exact entry.
+    const index = typeof feedId === 'object' ? skipped.indexOf(feedId) :
+      skipped.findIndex(e => e.feedId === feedId && e.uid === uid && e.occurrence === occurrence);
     if (index < 0) return;
     const [event] = skipped.splice(index, 1);
-    const feed = state.calendars.find(f => f.id === feedId) || event;
+    const feed = state.calendars.find(f => f.id === event.feedId) || event;
     const classId = eventClass(state, feed, event.title);
     event.includeNotice = true;
     if (classId) state.items.push(importedItem(event, classId));
-    else state.calendarUnmatched.push(event);
+    else { delete event.classId; state.calendarUnmatched.push(event); }
   }
 
   function calendarURL(raw) {
@@ -135,10 +149,6 @@
       if (result && result.error) throw new Error(result.error);
       return C.parseICS(result && result.text, true);
     }
-    function update(feed, events) {
-      reconcile(state(), feed, events);
-      feed.lastSynced = new Date().toISOString();
-    }
     async function sync(id) {
       const feed = state().calendars.find(f => f.id === id);
       if (!feed || syncing.has(feed)) return;
@@ -147,7 +157,14 @@
       refresh();
       try {
         const events = await fetchEvents(calendarURL(feed.url));
-        if (state().calendars.includes(feed)) change('Sync Calendar', () => update(feed, events));
+        if (api.finishEditing) await api.finishEditing();
+        if (!state().calendars.includes(feed)) return;
+        const before = api.snapshot();
+        reconcile(state(), feed, events);
+        const changedItems = api.snapshot() !== before;
+        feed.lastSynced = new Date().toISOString();
+        if (changedItems) api.changed(before, 'Sync Calendar');
+        else if (api.persist) api.persist();
       } catch (error) {
         if (state().calendars.includes(feed)) errors.set(feed, error.message || 'Calendar sync failed.');
       } finally {
@@ -177,10 +194,10 @@
           const events = await fetchEvents(url);
           if (state().calendars !== feeds) throw new Error('Calendar list changed. Try again.');
           if (classId && !state().classes.some(c => c.id === classId)) throw new Error('Choose a class.');
-          const feed = { id: C.uid(), url, classId: classId || '', lastSynced: '' };
+          const feed = { id: C.uid(), url, classId: classId || '', lastSynced: new Date().toISOString() };
           change('Add Calendar', state => {
             state.calendars.push(feed);
-            update(feed, events);
+            reconcile(state, feed, events);
           });
         } finally {
           adding.delete(url);
@@ -195,8 +212,12 @@
           state.calendars.splice(index, 1);
           state.calendarUnmatched = state.calendarUnmatched.filter(e => e.feedId !== id);
           state.calendarSkipped = state.calendarSkipped.filter(e => e.feedId !== id);
+          state.calendarTombstones = (state.calendarTombstones || []).filter(e => e.feedId !== id);
           // Keep imported items as ordinary items after unsubscribing.
-          for (const item of state.items) if (item.calendar && item.calendar.feedId === id) delete item.calendar;
+          for (const item of state.items) {
+            if (item.calendar?.feedId === id) delete item.calendar;
+            if (item.calendarOrigin?.feedId === id) delete item.calendarOrigin;
+          }
         });
       },
       assign(classId) { change('Assign Calendar', state => assign(state, classId)); },
@@ -230,7 +251,7 @@
     setInterval(controller.syncAll, 6 * 60 * 60 * 1000);
   }
 
-  const Calendar = { reconcile, assign, editItem, calendarURL, createController, start };
+  const Calendar = { reconcile, assign, editItem: C.editItem, calendarURL, createController, start };
   if (typeof module !== 'undefined' && module.exports) module.exports = Calendar;
   else root.Calendar = Calendar;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

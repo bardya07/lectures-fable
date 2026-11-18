@@ -10,6 +10,22 @@ else
   trap 'rm -rf "$WORK"' EXIT
 fi
 
+# A failed rebuild or archive must preserve the previous distributable.
+mkdir -p "$WORK/package/build/Grod.app" "$WORK/package/bin"
+cp "$HERE/build.sh" "$HERE/release.sh" "$HERE/VERSION" "$WORK/package/"
+touch "$WORK/package/build/Grod.app/previous"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/package/bin/swiftc"
+chmod +x "$WORK/package/bin/swiftc"
+if PATH="$WORK/package/bin:$PATH" "$WORK/package/build.sh"; then exit 1; fi
+test -f "$WORK/package/build/Grod.app/previous"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/package/build.sh"
+cp "$WORK/package/bin/swiftc" "$WORK/package/bin/ditto"
+archive="$WORK/package/build/Grod-$(cat "$HERE/VERSION").zip"
+echo previous > "$archive"
+if PATH="$WORK/package/bin:$PATH" "$WORK/package/release.sh"; then exit 1; fi
+test "$(cat "$archive")" = previous
+echo "Build and release failure recovery passed."
+
 swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/app/VersionComparison.swift" "$HERE/tests/version_comparison.test.swift" -o "$WORK/version-comparison-tests"
 "$WORK/version-comparison-tests"
 swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/app/Launch.swift" "$HERE/app/Store.swift" "$HERE/tests/store_migration.test.swift" -o "$WORK/store-migration-tests"
@@ -19,6 +35,8 @@ swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/app/Calen
 "$WORK/calendar-fetch-tests" "$WORK/calendar.ics"
 node "$HERE/tests/core.test.js"
 node "$HERE/tests/calendar.test.js"
+swiftc -swift-version 5 -module-cache-path "$WORK/module-cache" "$HERE/tests/webkit.test.swift" -parse-as-library -o "$WORK/web-tests"
+"$WORK/web-tests" "$HERE"
 if [[ ! -x "$APP" ]]; then
   echo "Build the app first with fable/build.sh" >&2
   exit 1

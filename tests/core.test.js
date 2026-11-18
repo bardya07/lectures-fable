@@ -146,6 +146,13 @@ test('addSeries: skips dates with a lecture, keeps fields and can mark past occu
   eq(new Set(s.items.map(i => i.id)).size, 4);
 });
 
+test('repeat preview counts new dates beyond the first 400 occupied slots', () => {
+  const occupied = new Set(C.recurrence('2026-01-01', '2027-02-06', [0, 1, 2, 3, 4, 5, 6]));
+  eq(occupied.size, 400);
+  eq(C.recurrence('2026-01-01', '2027-02-06', [0, 1, 2, 3, 4, 5, 6], occupied),
+    ['2027-02-05', '2027-02-06']);
+});
+
 test('addSeries: assignment, exam and untitled lecture labels follow the selected type', () => {
   const s = state(['a'], []);
   const dates = ['2026-11-20', '2026-11-27'];
@@ -173,6 +180,9 @@ test('markThrough, markPastDone, removeFollowing only touch that class\'s lectur
   s = mk();
   eq(C.removeFollowing(s, 'a3'), 2);
   eq(s.items.map(i => i.id), ['a1', 'a2', 'b1', 'h']);
+  eq(C.removeFollowing(s, 'h'), 0);
+  eq(C.markThrough(s, 'h'), 0);
+  eq(s.items.map(i => i.done), [false, false, false, false]);
 });
 
 test('classes: add assigns unused colours, move and remove', () => {
@@ -236,6 +246,7 @@ test('normalize: reads the original Lectures data file and its exports', () => {
   eq(d.settings, { view: 'compact', theme: 'system' });
   eq(C.normalize({ classes: old.state.classes, items: old.state.items }).items[1].title, 'Midterm');
   eq(C.normalize(Object.assign({}, old, { view: 'date' })).settings.view, 'timeline');
+  eq(C.normalize(old, { view: 'timeline', theme: 'dark' }).settings, { view: 'compact', theme: 'dark' });
 });
 
 test('normalize: drops what it cannot use and never throws on junk', () => {
@@ -257,6 +268,27 @@ test('serialize → normalize round-trips', () => {
   s.settings = { view: 'compact', theme: 'light' };
   const d = C.normalize(JSON.parse(JSON.stringify(C.serialize(s))));
   eq({ classes: d.classes, items: d.items, settings: d.settings }, s);
+});
+
+test('malformed optional data cannot hide an otherwise valid backup', () => {
+  const d = C.normalize({ state: {}, classes: [{ id: 'c', name: 'C' }, { name: { toString: 2 } }],
+    items: [lec('l', 'c', TODAY)], calendarUnmatched: [
+      { feedId: '', uid: 'file', occurrence: '', date: TODAY, title: { description: 42 } },
+    ] });
+  eq([d.classes.length, d.items[0].id, d.dropped, d.calendarUnmatched[0].title], [1, 'l', 1, '']);
+});
+
+test('long item links survive sync, export and reload without truncating the destination', () => {
+  const Calendar = require('../web/calendar.js');
+  const url = 'https://example.test/file?token=' + 'a'.repeat(2100);
+  const s = state(['a'], []);
+  s.calendars = [{ id: 'f', classId: 'a', url: 'https://example.test/feed' }];
+  Calendar.reconcile(s, s.calendars[0], C.parseICS('BEGIN:VEVENT\nUID:u\nDTSTART:20261116\nURL:' + url + '\nEND:VEVENT'));
+  const item = C.normalize(C.serialize(s)).items[0];
+  eq([item.link, item.calendar.original.link], [url, url]);
+  s.calendars[0].url = url;
+  eq(C.normalize(s).calendars[0].url, url);
+  assert.throws(() => Calendar.calendarURL(url), /too long/);
 });
 
 test('links: bare domains get https, paths and other schemes are left alone', () => {

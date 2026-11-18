@@ -62,6 +62,7 @@ const cases = [
   ['Tutorial D409 Cancelled', timed, 'skip'],
   ['Tutorials Cancelled Today', timed, 'skip'],
   ['Remembrance Day no classes or tutorials', timed, 'skip'],
+  ['No class today', timed, 'skip'],
   ['Regional closure', [...allDay, 'CATEGORIES:Holidays'], 'skip'],
   ['Labour Day', allDay, 'skip'],
   ['Session 3', [...timed, 'STATUS:CANCELLED'], 'skip'],
@@ -72,7 +73,152 @@ const cases = [
   ['Seminar: holiday customs', timed, 'lecture'],
 ];
 
+async function testDeletedOccurrences() {
+  const text = calendar(vevent('Weekly lecture', weekly));
+  let state = C.normalize({ classes: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], items: [] });
+  let fetch = () => ({ text });
+  const controller = Calendar.createController({
+    state: () => state, snapshot: () => JSON.stringify(state), changed() {}, call: () => fetch(),
+  });
+  const url = 'https://example.test/weekly';
+  await controller.add(url, 'a');
+  await controller.add(url + '-other', 'b');
+  const [feed, other] = state.calendars;
+  const first = state.items[0];
+  let reply;
+  fetch = () => new Promise(resolve => { reply = resolve; });
+  const pending = controller.sync(feed.id);
+  C.removeItems(state, item => item.id === first.id);
+  reply({ text });
+  await pending;
+  assert.deepEqual(state.items.map(i => i.calendar.feedId), [feed.id, other.id, other.id]);
+  const { feedId, uid, occurrence } = first.calendar;
+  const tombstone = { feedId, uid, occurrence };
+  state = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  assert.deepEqual(state.calendarTombstones, [tombstone]);
+  const [survivor] = state.items;
+  C.removeFollowing(state, survivor.id);
+  fetch = () => ({ text: text.replace('Weekly lecture', 'Lecture cancelled') });
+  await controller.sync(feed.id);
+  assert.equal(state.calendarSkipped.length, 0);
+  C.removeClass(state, 'b');
+  assert.equal(state.calendarTombstones.length, 4);
+  fetch = () => ({ text });
+  await controller.sync(other.id);
+  assert.equal(state.calendarUnmatched.length, 0);
+  assert.equal(state.items.length, 0);
+  controller.remove(feed.id);
+  assert.deepEqual(state.calendarTombstones.map(t => t.feedId), [other.id, other.id]);
+  await controller.add(url, 'a');
+  assert.equal(state.items.length, 2);
+  assert.notEqual(state.items[0].calendar.feedId, feed.id);
+}
+
+function testRecurrence() {
+  const alt = ['DTSTART;TZID="Europe/Berlin";X-NOTE="point;a:b":20261018T023000', 'RRULE:FREQ=WEEKLY;COUNT=3'];
+  const fold = vevent('Moved', ['RECURRENCE-ID:20261025T003000Z', 'DTSTART:20261026T120000Z']);
+  const expanded = C.parseICS(calendar(vevent('Class', alt), fold), true);
+  assert.deepEqual(expanded.map(e => [e.title, e.occurrence]), [
+    ['Class', '2026-10-18'], ['Moved', '2026-10-25'], ['Class', '2026-11-01'],
+  ]);
+  const gap = C.parseICS(calendar(vevent('Weekly', [
+    'DTSTART;TZID=Europe/Berlin:20260322T023000', 'RRULE:FREQ=WEEKLY;COUNT=3',
+  ])), true);
+  assert.deepEqual(gap.map(e => e.occurrence), ['2026-03-22', '2026-04-05', '2026-04-12']);
+  const replace = C.parseICS(calendar(
+    vevent('Class', ['DTSTART;TZID=America/Vancouver:20261116T230000', 'RRULE:FREQ=WEEKLY;COUNT=2', 'EXDATE:20261117T070000Z']),
+    vevent('Changed', ['RECURRENCE-ID:20261117T070000Z', 'DTSTART:20261118T070000Z'])), true);
+  assert.equal(replace.find(e => e.title === 'Changed').occurrence, '2026-11-16');
+  assert.equal(C.parseICS(calendar(vevent('Class', [...allDay, 'EXDATE;VALUE=DATE:20261116'])), true).length, 0);
+}
+
+async function testUnchangedSync() {
+  const text = calendar(vevent('Lecture', weekly, 'u'), vevent('Holiday', allDay, 'h'));
+  let s = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [] });
+  const changes = [], persisted = [];
+  const ctl = Calendar.createController({ state: () => s, snapshot: () => JSON.stringify(s), call: () => ({ text }),
+    changed: (_, label) => changes.push(label), persist: () => persisted.push(s.calendars[0].lastSynced) });
+  await ctl.add('https://example.test/one', '');
+  await ctl.add('https://example.test/two', 'a');
+  s = C.normalize(C.serialize(s));
+  const order = s.calendarSkipped.map(e => e.feedId);
+  await ctl.syncAll();
+  assert.deepEqual(s.calendarSkipped.map(e => e.feedId), order);
+  assert.deepEqual(changes, ['Add Calendar', 'Add Calendar']);
+  assert.equal(persisted.length, 2);
+}
+
+async function testRemovedUpstream() {
+  let state = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [] });
+  let text = calendar(vevent('Lecture', weekly));
+  const ctl = Calendar.createController({ state: () => state, snapshot: () => JSON.stringify(state), call: () => ({ text }), changed() {} });
+  await ctl.add('https://example.test/reappearing', 'a');
+  const feed = state.calendars[0].id;
+  for (const item of state.items) item.done = true;
+  text = calendar();
+  await ctl.sync(feed);
+  state = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  assert.ok(state.items.every(i => !i.calendar && i.calendarOrigin.feedId === feed));
+  C.removeItems(state, i => i.calendarOrigin.occurrence === '2026-11-16');
+  text = calendar(vevent('Lecture', weekly));
+  await ctl.sync(feed);
+  assert.equal(state.items.length, 1);
+  assert.ok(state.items[0].done);
+  ctl.remove(feed);
+  assert.ok(!state.items[0].calendarOrigin && !state.calendarTombstones.length);
+}
+
+function testDragAndDuplicates() {
+  const state = C.normalize({ classes: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], items: [] });
+  const feed = { id: 'f', classId: 'a' };
+  const events = C.parseICS(calendar(vevent('Lecture', allDay)), true);
+  Calendar.reconcile(state, feed, events);
+  const item = state.items[0];
+  C.moveItemToWeek(state, item.id, 'b', '2026-11-23');
+  C.moveItemToWeek(state, item.id, 'a', '2026-11-16');
+  assert.deepEqual(item.calendar.edited.sort(), ['classId', 'date']);
+  const duplicate = JSON.parse(JSON.stringify(item));
+  duplicate.id = 'duplicate';
+  delete duplicate.calendar.edited;
+  state.items.push(duplicate);
+  Calendar.reconcile(state, { id: 'f', classId: 'b' }, events.map(e => ({ ...e, date: '2026-11-30' })));
+  assert.equal(state.items.length, 1);
+  assert.deepEqual([item.classId, item.date], ['a', '2026-11-16']);
+}
+
+async function testSyncWhileEditing() {
+  const s = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [] });
+  let text = calendar(vevent('Lecture', timed));
+  let endEdit, editing;
+  const ctl = Calendar.createController({
+    state: () => s, snapshot: () => JSON.stringify(s), call: () => ({ text }), changed() {},
+    finishEditing: () => editing,
+  });
+  await ctl.add('https://example.test/editor', 'a');
+  const feed = s.calendars[0], item = s.items[0];
+  for (const removed of [false, true]) {
+    editing = new Promise(resolve => { endEdit = resolve; });
+    text = removed ? calendar() : calendar(vevent('Exam', ['DTSTART:20261119T180000Z']));
+    const pending = ctl.sync(feed.id);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(item.title, removed ? 'Exam' : 'Lecture');
+    assert.ok(s.items.includes(item));
+    Calendar.editItem(item, { link: 'https://example.test/notes' });
+    endEdit();
+    await pending;
+    assert.deepEqual([item.title, item.type, item.link], ['Exam', 'exam', 'https://example.test/notes']);
+    assert.equal(!!item.calendar, !removed);
+    assert.ok(s.items.includes(item));
+  }
+}
+
 async function main() {
+  await testDeletedOccurrences();
+  await testUnchangedSync();
+  await testRemovedUpstream();
+  await testSyncWhileEditing();
+  testRecurrence();
+  testDragAndDuplicates();
   for (const [title, properties, expected, uid] of cases) {
     const events = C.parseICS(calendar(vevent(title, properties, uid)), true);
     assert.ok(events.length, title);
@@ -93,8 +239,12 @@ async function main() {
   const moved = vevent('Lecture moved', ['RECURRENCE-ID:20261123T180000Z', 'DTSTART:20261124T180000Z']);
   const cancelled = vevent('Cancelled session', ['RECURRENCE-ID:20261116T180000Z', 'STATUS:CANCELLED']);
   const occurrences = C.parseICS(calendar(moved, vevent('Lecture', weekly), cancelled), true);
+  const localDay = stamp => {
+    const d = new Date(stamp);
+    return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+  };
   assert.deepEqual(occurrences.map(e => [e.occurrence, e.date, e.type]), [
-    ['2026-11-16', '2026-11-16', 'skip'], ['2026-11-23', '2026-11-24', 'lecture'],
+    ['2026-11-16', localDay('2026-11-16T18:00:00Z'), 'skip'], ['2026-11-23', localDay('2026-11-24T18:00:00Z'), 'lecture'],
   ]);
   const utcOverride = vevent('Lecture moved', ['RECURRENCE-ID:20261117T070000Z', 'DTSTART:20261118T070000Z']);
   const zonedLecture = vevent('Lecture', ['DTSTART;TZID=America/Vancouver:20261116T230000', 'RRULE:FREQ=WEEKLY;COUNT=2']);
@@ -144,6 +294,13 @@ async function main() {
 
   // An explicit type override still applies after the upstream classifier agrees once.
   const quiz = state.items.find(item => item.type === 'exam');
+  const old = state.items.find(item => item.type === 'assignment');
+  old.type = 'lecture';
+  old.calendar.edited = ['title'];
+  old.title = 'My title';
+  old.done = true;
+  const oldReview = state.items.find(item => item.title.includes('Review Session'));
+  oldReview.type = oldReview.calendar.original.type = 'exam';
   Calendar.editItem(quiz, { ...quiz, type: 'assignment' });
   const sync = controller.sync(feedId);
   assert.equal(controller.list().feeds[0].syncing, true);
@@ -156,6 +313,8 @@ async function main() {
   assert.equal(state.items.find(item => item.title === 'Essay [PHY 567]').classId, 'c');
   reply({ text: canvas.replace('Quiz #4', 'Worksheet due') });
   await sync;
+  assert.deepEqual([old.type, old.title, old.done, old.calendar.edited], ['assignment', 'My title', true, ['title']]);
+  assert.equal(oldReview.type, 'lecture');
   assert.equal(state.calendars.length, 2);
   const normalized = C.normalize(C.serialize(state));
   assert.equal(normalized.calendarSkipped.length, 2);
@@ -187,6 +346,15 @@ async function main() {
   await failedSync;
   assert.equal(state.items.length, oldCount);
   assert.equal(controller.list().feeds[0].error, 'Invalid calendar event.');
+  for (const bad of [calendar('invalid line'), calendar(vevent('Class', [...timed, 'RRULE:FREQ=WEEKLY;COUNT=0'])),
+    calendar(vevent('Class', [...weekly, 'EXDATE:not-a-date']))]) {
+    const before = JSON.stringify(state);
+    const invalid = controller.sync(feedId);
+    reply({ text: bad });
+    await invalid;
+    assert.equal(JSON.stringify(state), before);
+    assert.match(controller.list().feeds[0].error, /Invalid/);
+  }
   const recovery = controller.sync(feedId);
   reply({ text: canvas });
   await recovery;
@@ -216,6 +384,13 @@ async function main() {
   const localNote = state.calendarSkipped[0];
   controller.importNotice('', localNote.uid, localNote.occurrence);
   assert.ok(state.items.some(item => !item.calendar && item.classId === 'c' && item.title === localNote.title));
+  const secondFile = controller.importFile('b');
+  reply({ text: canvas.replace('Tutorials Cancelled Today', 'No class today') });
+  await secondFile;
+  const secondNote = state.calendarSkipped.find(note => note.title.startsWith('No class today'));
+  controller.importNotice(secondNote);
+  assert.ok(state.items.some(item => !item.calendar && item.classId === 'b' && item.title === secondNote.title));
+  assert.ok(state.calendarSkipped.some(note => note.feedId === '' && note.uid === secondNote.uid));
   console.log('calendar: ' + cases.length + ' classification fixtures and reconciliation/controller checks passed');
 }
 

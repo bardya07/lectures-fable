@@ -2,6 +2,9 @@
 // the result, the saved file and the native menus. Starts from an empty temporary data folder.
 (async () => {
   const C = window.Core;
+  // The fixture's lecture series runs from September through December 2026.
+  C.now = () => new Date(2026, 10, 18, 12);
+  window.dispatchEvent(new Event('focus'));
   const bridge = msg => window.webkit.messageHandlers.app.postMessage(msg);
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -785,6 +788,19 @@
       find(quiz.id).type, autoItems().find(item => item.title.startsWith('Podcast')).classId,
       autoItems().filter(item => item.calendar.includeNotice).length, state().calendarUnmatched.length,
     ], [false, 'assignment', 'class1', 1, 0]);
+    click($('#calendar-close'));
+    await window.App.itemAction(quiz.id, 'delete');
+    const tombstones = () => state().calendarTombstones.map(t => [t.feedId, t.uid, t.occurrence]);
+    const deletion = [[auto.id, quiz.calendar.uid, quiz.calendar.occurrence]];
+    eq('deleting a feed item records its identity', tombstones(), deletion);
+    window.App.command('undo');
+    eq('undo restores the item and removes the tombstone', [!!find(quiz.id), tombstones()], [true, []]);
+    window.App.command('redo');
+    eq('redo saves the tombstone again', (await saved()).calendarTombstones.length, 1);
+    window.App.command('calendars');
+    click(syncButton(auto.id));
+    await waitFor('sync after redo', () => !syncButton(auto.id).disabled);
+    check('the deleted quiz stays gone', !autoItems().some(item => item.calendar.uid === quiz.calendar.uid));
     const beforeRemove = state().items.length;
     click($('[data-calendar-action="remove"][data-id="' + auto.id + '"]'));
     eq('Remove keeps imported items and clears that feed’s pending notices', [

@@ -61,10 +61,10 @@ enum CalendarFetch {
 
     static func fetch(_ url: URL, configuration: URLSessionConfiguration = configuration()) async throws -> String {
         let session = URLSession(configuration: configuration)
-        defer { session.finishTasksAndInvalidate() }
+        defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url)
         request.setValue("text/calendar, */*;q=0.5", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request, delegate: Redirects())
+        let (bytes, response) = try await session.bytes(for: request, delegate: Redirects())
         guard let http = response as? HTTPURLResponse, http.url?.scheme?.lowercased() == "https" else {
             throw Failure.redirect
         }
@@ -73,6 +73,12 @@ enum CalendarFetch {
             throw Failure.redirect
         }
         guard (200...299).contains(http.statusCode) else { throw Failure.http(http.statusCode) }
+        guard response.expectedContentLength <= maxBytes else { throw Failure.tooLarge }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maxBytes else { throw Failure.tooLarge }
+            data.append(byte)
+        }
         return try decode(data)
     }
 

@@ -8,13 +8,13 @@ NAME="Grod"
 BUNDLE_ID="com.local.lectures-fable"
 VERSION="$(cat "$HERE/VERSION")"
 BUILD="$HERE/build"
-APP="$BUILD/$NAME.app"
 CACHE="$BUILD/.cache"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/lectures-fable.XXXXXX")"
+mkdir -p "$CACHE"
+WORK="$(mktemp -d "$BUILD/.grod-build.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+APP="$WORK/$NAME.app"
 
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$CACHE"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 echo "Compiling…"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
@@ -53,4 +53,16 @@ PLIST
 
 codesign --force --sign - "$APP" >/dev/null 2>&1
 codesign --verify --strict "$APP"
-echo "Built $APP"
+# Publish only a verified bundle. Swapping directories also keeps a running build
+# available if compilation, icon generation or signing fails.
+swift -module-cache-path "$CACHE" - "$APP" "$BUILD/$NAME.app" <<'SWIFT'
+import Darwin
+let source = CommandLine.arguments[1], target = CommandLine.arguments[2]
+if rename(source, target) != 0 {
+    guard (errno == ENOTEMPTY || errno == EEXIST), renamex_np(source, target, UInt32(RENAME_SWAP)) == 0 else {
+        perror("Publishing Grod.app")
+        exit(1)
+    }
+}
+SWIFT
+echo "Built $BUILD/$NAME.app"

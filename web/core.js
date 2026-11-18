@@ -67,9 +67,9 @@
   // ---------------------------------------------------------------- reading files
   // Accepts this app's file, the original Lectures export ({classes, items}) and the
   // original Lectures data file ({state: {classes, items}, view}). Returns null if unusable.
-  function normalize(raw) {
+  function normalize(raw, defaults = {}) {
     let src = raw;
-    if (src && typeof src === 'object' && src.state && typeof src.state === 'object') {
+    if (src && Array.isArray(src.state?.classes) && Array.isArray(src.state.items)) {
       src = Object.assign({}, src.state, { settings: { view: src.view } });
     }
     if (!src || typeof src !== 'object' || !Array.isArray(src.classes) || !Array.isArray(src.items)) return null;
@@ -79,7 +79,7 @@
     const classIds = new Set();
     const usedColors = new Set();
     for (const c of src.classes) {
-      const name = c && typeof c === 'object' ? String(c.name == null ? '' : c.name).trim().slice(0, 80) : '';
+      const name = c && ['string', 'number', 'boolean'].includes(typeof c.name) ? String(c.name).trim().slice(0, 80) : '';
       if (!name || (typeof c.id === 'string' && classIds.has(c.id))) { dropped++; continue; }
       const id = typeof c.id === 'string' && c.id ? c.id : uid();
       classIds.add(id);
@@ -105,24 +105,30 @@
         title: typeof it.title === 'string' ? it.title.trim().slice(0, 200) : '',
         date: it.date,
         done: it.done === true,
-        link: typeof it.link === 'string' ? it.link.trim().slice(0, 2000) : '',
+        link: typeof it.link === 'string' ? it.link.trim() : '',
       };
       const cal = it.calendar, original = cal && cal.original;
       if (cal && typeof cal.feedId === 'string' && cal.feedId && typeof cal.uid === 'string' && cal.uid &&
           typeof cal.occurrence === 'string' && original && typeof original.classId === 'string' &&
           TYPES.includes(original.type) && typeof original.title === 'string' && isISO(original.date) && typeof original.link === 'string') {
         item.calendar = { feedId: cal.feedId, uid: cal.uid, occurrence: cal.occurrence,
-          original: { classId: original.classId, type: original.type, title: original.title.slice(0, 200), date: original.date, link: original.link.slice(0, 2000) } };
+          original: { classId: original.classId, type: original.type, title: original.title.slice(0, 200), date: original.date, link: original.link } };
         if (Array.isArray(cal.edited)) item.calendar.edited = cal.edited.filter(f => CALENDAR_FIELDS.includes(f));
         if (cal.includeNotice === true) item.calendar.includeNotice = true;
+      } else {
+        const origin = it.calendarOrigin;
+        if (typeof origin?.feedId === 'string' && origin.feedId && typeof origin.uid === 'string' && origin.uid &&
+            typeof origin.occurrence === 'string') {
+          item.calendarOrigin = { feedId: origin.feedId, uid: origin.uid, occurrence: origin.occurrence };
+        }
       }
       items.push(item);
     }
 
     const s = src.settings && typeof src.settings === 'object' ? src.settings : {};
     const settings = {
-      view: VIEWS.includes(s.view) ? s.view : 'timeline',
-      theme: THEMES.includes(s.theme) ? s.theme : 'system',
+      view: VIEWS.includes(s.view) ? s.view : defaults.view || 'timeline',
+      theme: THEMES.includes(s.theme) ? s.theme : defaults.theme || 'system',
     };
     const calendars = [];
     const calendarIds = new Set();
@@ -130,7 +136,7 @@
       if (!cal || typeof cal.id !== 'string' || !cal.id || calendarIds.has(cal.id) ||
           typeof cal.url !== 'string' || !/^(https|webcal):\/\//i.test(cal.url)) continue;
       calendarIds.add(cal.id);
-      calendars.push({ id: cal.id, url: cal.url.slice(0, 2000), classId: classIds.has(cal.classId) ? cal.classId : '',
+      calendars.push({ id: cal.id, url: cal.url, classId: classIds.has(cal.classId) ? cal.classId : '',
         lastSynced: typeof cal.lastSynced === 'string' ? cal.lastSynced : '' });
     }
     function calendarEntries(entries, skipped) {
@@ -138,20 +144,36 @@
       for (const event of Array.isArray(entries) ? entries : []) {
         if (!event || !(event.feedId === '' || calendarIds.has(event.feedId)) || typeof event.uid !== 'string' || !event.uid ||
             typeof event.occurrence !== 'string' || !isISO(event.date)) continue;
-        const inferred = TYPES.includes(event.type) ? event.type : calendarType(event.title);
+        const title = typeof event.title === 'string' ? event.title.slice(0, 200) : '';
+        const inferred = TYPES.includes(event.type) ? event.type : calendarType(title);
         const entry = { feedId: event.feedId, uid: event.uid, occurrence: event.occurrence,
-          title: typeof event.title === 'string' ? event.title.slice(0, 200) : '',
+          title,
           type: inferred === 'skip' ? 'lecture' : inferred, date: event.date,
-          link: typeof event.link === 'string' ? event.link.slice(0, 2000) : '' };
+          link: typeof event.link === 'string' ? event.link : '' };
         if (event.includeNotice === true) entry.includeNotice = true;
         if (skipped) entry.classId = classIds.has(event.classId) ? event.classId : '';
         result.push(entry);
       }
       return result;
     }
-    return { classes, items, settings, calendars,
-      calendarUnmatched: calendarEntries(src.calendarUnmatched, false),
-      calendarSkipped: calendarEntries(src.calendarSkipped, true), dropped };
+    const calendarTombstones = [];
+    const deleted = new Set();
+    for (const entry of Array.isArray(src.calendarTombstones) ? src.calendarTombstones : []) {
+      if (!entry || !calendarIds.has(entry.feedId) || typeof entry.uid !== 'string' || !entry.uid ||
+          typeof entry.occurrence !== 'string' || deleted.has(calendarKey(entry))) continue;
+      deleted.add(calendarKey(entry));
+      calendarTombstones.push({ feedId: entry.feedId, uid: entry.uid, occurrence: entry.occurrence });
+    }
+    for (const item of items) {
+      if (item.calendarOrigin && !calendarIds.has(item.calendarOrigin.feedId)) delete item.calendarOrigin;
+    }
+    return { classes, settings, calendars, calendarTombstones,
+      items: items.filter(item => {
+        const source = item.calendar || item.calendarOrigin;
+        return !source || !deleted.has(calendarKey(source));
+      }),
+      calendarUnmatched: calendarEntries(src.calendarUnmatched, false).filter(e => !deleted.has(calendarKey(e))),
+      calendarSkipped: calendarEntries(src.calendarSkipped, true).filter(e => !deleted.has(calendarKey(e))), dropped };
   }
 
   function nextColor(used) {
@@ -161,7 +183,8 @@
 
   function serialize(state) {
     return { app: 'lectures-fable', version: 1, classes: state.classes, items: state.items, settings: state.settings,
-      calendars: state.calendars || [], calendarUnmatched: state.calendarUnmatched || [], calendarSkipped: state.calendarSkipped || [] };
+      calendars: state.calendars || [], calendarUnmatched: state.calendarUnmatched || [], calendarSkipped: state.calendarSkipped || [],
+      calendarTombstones: state.calendarTombstones || [] };
   }
 
   // ---------------------------------------------------------------- derived facts
@@ -262,7 +285,7 @@
     return out;
   }
 
-  function recurrence(start, until, weekdays) {
+  function recurrence(start, until, weekdays, taken) {
     const out = [];
     if (!isISO(start) || !isISO(until) || !weekdays || !weekdays.length) return out;
     const set = new Set(weekdays);
@@ -270,7 +293,7 @@
     const b = dayNum(until);
     for (let n = a; n <= b && out.length < MAX_SERIES; n++) {
       const iso = toISO(n);
-      if (set.has(weekday(iso))) out.push(iso);
+      if (set.has(weekday(iso)) && !taken?.has(iso)) out.push(iso);
     }
     return out;
   }
@@ -289,26 +312,35 @@
     return { day, time: m[4] ? [ +m[4], +m[5], +(m[6] || 0) ] : null,
       zone: m[7] ? 'UTC' : ((params && params.TZID) || '').replace(/^"|"$/g, '') };
   }
-  function icsInstant(spec, day) {
+  function icsInstant(spec, day, skipGap = false) {
     if (!spec.time) return null;
     const [h, m, s] = spec.time;
     const y = +day.slice(0, 4), mo = +day.slice(5, 7) - 1, d = +day.slice(8, 10);
     const wall = Date.UTC(y, mo, d, h, m, s);
     if (spec.zone === 'UTC') return wall;
-    if (!spec.zone) return new Date(y, mo, d, h, m, s).getTime();
-    try {
-      const fmt = new Intl.DateTimeFormat('en-US', { timeZone: spec.zone, year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
-      let instant = wall;
-      for (let i = 0; i < 3; i++) {
-        const parts = Object.fromEntries(fmt.formatToParts(new Date(instant)).map(p => [p.type, p.value]));
-        const observed = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
-        const shift = wall - observed;
-        instant += shift;
-        if (!shift) break;
-      }
-      return instant;
-    } catch (_) { return new Date(y, mo, d, h, m, s).getTime(); }
+    if (spec.zone && spec.formatter === undefined) {
+      try {
+        spec.formatter = new Intl.DateTimeFormat('en-US', { timeZone: spec.zone, year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+      } catch (_) { spec.formatter = null; }
+    }
+    if (!spec.formatter) {
+      const local = new Date(y, mo, d, h, m, s);
+      if (skipGap && (local.getDate() !== d || local.getHours() !== h || local.getMinutes() !== m)) return null;
+      return local.getTime();
+    }
+    const offsetAt = instant => {
+      const p = Object.fromEntries(spec.formatter.formatToParts(new Date(instant)).map(part => [part.type, part.value]));
+      return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - instant;
+    };
+    // A repeated wall time denotes the first occurrence. A standalone time in a gap
+    // uses the pre-transition offset, while recurrence expansion omits nonexistent times.
+    const before = offsetAt(wall - DAY_MS);
+    const first = wall - before;
+    const actual = offsetAt(first);
+    if (actual === before) return first;
+    const second = wall - actual;
+    return offsetAt(second) === actual ? second : skipGap ? null : first;
   }
   function icsLocalDate(spec, day) {
     return spec.time ? localISO(new Date(icsInstant(spec, day))) : day;
@@ -319,7 +351,7 @@
     lecture: /\b(?:lectures?|lec\d*|class(?:es)?|seminars?|tutorials?)\b/i,
   };
   const strongExam = /\b(?:exams?|midterms?|quiz(?:zes)?|tests?|assessments?)\b/i;
-  const calendarNotice = /\b(?:cancel(?:l)?ed|cancellations?|no\s+(?:classes?|lectures?|tutorials?|labs?)|cut[\s-]?off|campus closed)\b/i;
+  const calendarNotice = /\b(?:cancel(?:l)?ed|cancellations?|no\s+(?:class(?:es)?|lectures?|tutorials?|labs?)|cut[\s-]?off|campus closed)\b/i;
   const calendarHoliday = /(?:^|[-–—]\s*)(?:(?:public|statutory|university)\s+)?(?:holiday|remembrance day|thanksgiving(?: day)?|reading (?:day|break|week)|spring break|winter break|(?:labou?r|family|victoria|canada|independence|memorial|christmas|boxing|new year['’]s) day|good friday)\s*$/i;
 
   function calendarType(event) {
@@ -398,6 +430,7 @@
     const events = [];
     const overrides = new Map();
     const occurrences = new Map();
+    const excludedOccurrences = new Map();
     const occurrenceKey = (uid, spec, day) => JSON.stringify([uid, spec.time ? icsInstant(spec, day) : day]);
     let props = null, componentDepth = 0;
     const components = [];
@@ -426,7 +459,7 @@
         const date = icsLocalDate(spec, day);
         const type = calendarType({ uid: uidValue, title, date, link, description: descriptionText, categories,
           allDay: !spec.time, recurring: recurring || !!original, duration, status: value('STATUS') });
-        const event = { uid: uidValue, title: title.slice(0, 200), date, link: link.slice(0, 2000),
+        const event = { uid: uidValue, title: title.slice(0, 200), date, link,
           occurrence: original ? original.day : recurring ? day : '', type };
         if (original) {
           overrides.set(occurrenceKey(uidValue, original, original.day), event);
@@ -435,7 +468,20 @@
           events.push(event);
         }
       };
-      if (!rrule) { emit(spec.day, false); return; }
+      const excludedDays = new Set(), excludedTimes = new Set();
+      for (const ex of p.EXDATE || []) for (const value of ex.value.split(',')) {
+        const parsed = icsDate(value, ex.params);
+        if (!parsed) {
+          if (strict) throw new Error('Invalid calendar exclusion date.');
+          continue;
+        }
+        if (spec.time && parsed.time) excludedTimes.add(icsInstant(parsed, parsed.day));
+        else excludedDays.add(parsed.day);
+      }
+      if (!rrule) {
+        if (!excludedDays.has(spec.day) && !excludedTimes.has(icsInstant(spec, spec.day))) emit(spec.day, false);
+        return;
+      }
       const rule = {};
       for (const part of rrule.value.split(';')) {
         const at = part.indexOf('=');
@@ -445,40 +491,50 @@
       if (rule.FREQ !== 'WEEKLY' || Object.keys(rule).some(k => !['FREQ', 'BYDAY', 'UNTIL', 'COUNT', 'INTERVAL', 'WKST'].includes(k))) return;
       const days = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
       const byday = rule.BYDAY ? rule.BYDAY.split(',').map(x => days.indexOf(x)) : [weekday(spec.day)];
-      if (byday.some(x => x < 0) || (rule.WKST && !days.includes(rule.WKST))) return;
-      const interval = rule.INTERVAL ? +rule.INTERVAL : 1;
-      const count = rule.COUNT ? +rule.COUNT : Infinity;
-      if (!Number.isInteger(interval) || interval < 1 || !(count > 0) || (count !== Infinity && !Number.isInteger(count))) return;
+      const interval = rule.INTERVAL === undefined ? 1 : Number(rule.INTERVAL);
+      const count = rule.COUNT === undefined ? Infinity : Number(rule.COUNT);
       const until = rule.UNTIL ? icsDate(rule.UNTIL, {}) : null;
-      if (rule.UNTIL && !until) return;
-      const excluded = [];
-      for (const ex of p.EXDATE || []) for (const value of ex.value.split(',')) {
-        const parsed = icsDate(value, ex.params);
-        if (parsed) excluded.push(parsed);
+      if (byday.some(x => x < 0) || (rule.WKST && !days.includes(rule.WKST)) ||
+          [rule.INTERVAL, rule.COUNT].some(v => v !== undefined && (!/^\d+$/.test(v) || !Number.isSafeInteger(+v) || +v < 1)) ||
+          (rule.UNTIL !== undefined && !until)) {
+        if (strict) throw new Error('Invalid weekly calendar rule.');
+        return;
       }
+      const untilInstant = until?.time ? icsInstant(until, until.day) : null;
+      const lastDay = until ? dayNum(until.day) + (until.time ? 1 : 0) : Infinity;
       const weekStart = rule.WKST ? days.indexOf(rule.WKST) : 0;
       const startWeek = dayNum(spec.day) - ((weekday(spec.day) - weekStart + 7) % 7);
       let seen = 0, produced = 0;
       // Bound unending feeds, while allowing sparse intervals and exclusions.
-      for (let n = dayNum(spec.day), steps = 0; steps < 366 * 200 && seen < count && produced < MAX_SERIES; n++, steps++) {
+      for (let n = dayNum(spec.day), steps = 0; n <= lastDay && steps < 366 * 200 && seen < count && produced < MAX_SERIES; n++, steps++) {
         const day = toISO(n);
         const weeks = Math.floor((n - startWeek) / 7);
-        if (until && (until.time ? icsInstant(spec, day) > icsInstant(until, until.day) : day > until.day)) break;
         if (weeks % interval || !byday.includes(weekday(day))) continue;
+        const instant = icsInstant(spec, day, day !== spec.day);
+        if (spec.time && instant === null) continue;
+        if (untilInstant !== null && (spec.time ? instant > untilInstant : day > until.day)) break;
         seen++;
-        const instant = icsInstant(spec, day);
-        if (excluded.some(ex => ex.time && spec.time ? icsInstant(ex, ex.day) === instant : ex.day === day)) continue;
+        if (excludedDays.has(day) || excludedTimes.has(instant)) {
+          excludedOccurrences.set(occurrenceKey(uidValue, spec, day), day);
+          continue;
+        }
         emit(day, true);
         produced++;
       }
     };
     for (const line of lines) {
+      if (!line.trim()) continue;
+      // Quoted parameter values may contain both colons and semicolons.
+      const header = /^(?:[^":]|"[^"]*")*:/.exec(line);
       if (strict) {
+        if (!header || !/^[a-z0-9._-]+[;:]/i.test(header[0])) throw new Error('Invalid calendar file.');
         const component = /^(BEGIN|END):(.+)$/i.exec(line);
         if (component) {
           const name = component[2].toUpperCase();
-          if (component[1].toUpperCase() === 'BEGIN') components.push(name);
-          else if (components.pop() !== name) throw new Error('Invalid calendar file.');
+          if (component[1].toUpperCase() === 'BEGIN') {
+            if (name === 'VEVENT' && components[components.length - 1] !== 'VCALENDAR') throw new Error('Invalid calendar file.');
+            components.push(name);
+          } else if (components.pop() !== name) throw new Error('Invalid calendar file.');
         }
         if (components.length === 0 && !/^END:VCALENDAR$/i.test(line)) throw new Error('Invalid calendar file.');
       }
@@ -488,9 +544,9 @@
       if (/^END:VEVENT$/i.test(line) && componentDepth === 0) { addEvent(props); props = null; continue; }
       if (/^END:/i.test(line)) { componentDepth = Math.max(0, componentDepth - 1); continue; }
       if (componentDepth) continue;
-      const colon = line.indexOf(':');
-      if (colon < 0) continue;
-      const [rawName, ...parameters] = line.slice(0, colon).split(';');
+      if (!header) continue;
+      const colon = header[0].length - 1;
+      const [rawName, ...parameters] = line.slice(0, colon).match(/(?:[^;"]|"[^"]*")+/g) || [''];
       const name = rawName.toUpperCase(), params = {};
       for (const param of parameters) { const at = param.indexOf('='); if (at > 0) params[param.slice(0, at).toUpperCase()] = param.slice(at + 1); }
       (props[name] || (props[name] = [])).push({ value: line.slice(colon + 1), params });
@@ -506,7 +562,11 @@
       override.occurrence = event.occurrence;
       return override;
     });
-    return result.concat(Array.from(overrides.values()));
+    for (const [key, event] of overrides) {
+      if (excludedOccurrences.has(key)) event.occurrence = excludedOccurrences.get(key);
+      result.push(event);
+    }
+    return result;
   }
 
   // ---------------------------------------------------------------- layout
@@ -586,10 +646,30 @@
     return c;
   }
 
+  const calendarKey = entry => JSON.stringify([entry.feedId, entry.uid, entry.occurrence]);
+
+  // Only explicit user deletions suppress a feed occurrence. Upstream removals can return.
+  function removeItems(state, matches) {
+    const deleted = new Set((state.calendarTombstones || []).map(calendarKey));
+    const before = state.items.length;
+    state.items = state.items.filter(item => {
+      if (!matches(item)) return true;
+      const cal = item.calendar || item.calendarOrigin;
+      if (cal && !deleted.has(calendarKey(cal))) {
+        (state.calendarTombstones ||= []).push({ feedId: cal.feedId, uid: cal.uid, occurrence: cal.occurrence });
+        deleted.add(calendarKey(cal));
+      }
+      return false;
+    });
+    return before - state.items.length;
+  }
+
   function removeClass(state, classId) {
     const before = state.classes.length;
     state.classes = state.classes.filter(c => c.id !== classId);
-    state.items = state.items.filter(it => it.classId !== classId);
+    removeItems(state, it => it.classId === classId);
+    for (const feed of state.calendars || []) if (feed.classId === classId) feed.classId = '';
+    for (const note of state.calendarSkipped || []) if (note.classId === classId) note.classId = '';
     return before - state.classes.length;
   }
 
@@ -602,14 +682,24 @@
     return 1;
   }
 
+  function editItem(item, values) {
+    if (item.calendar) {
+      const edited = new Set(item.calendar.edited || []);
+      for (const field of CALENDAR_FIELDS) {
+        if (Object.hasOwn(values, field) && item[field] !== values[field]) edited.add(field);
+      }
+      if (edited.size) item.calendar.edited = Array.from(edited);
+    }
+    Object.assign(item, values);
+  }
+
   // Move to the same weekday in the target week, optionally changing class.
   function moveItemToWeek(state, id, classId, week) {
     const it = state.items.find(x => x.id === id);
     if (!it || !state.classes.some(c => c.id === classId) || !isISO(week)) return 0;
     const date = addDays(mondayOf(week), weekday(it.date));
     if (it.classId === classId && it.date === date) return 0;
-    it.classId = classId;
-    it.date = date;
+    editItem(it, { classId, date });
     return 1;
   }
 
@@ -635,7 +725,7 @@
 
   function markThrough(state, id) {
     const it = state.items.find(x => x.id === id);
-    if (!it) return 0;
+    if (!it || it.type !== 'lecture') return 0;
     let n = 0;
     for (const lec of classLectures(state, it.classId)) {
       if (!lec.done) { lec.done = true; n++; }
@@ -652,13 +742,12 @@
     return n;
   }
 
-  function removeFollowing(state, id) {
+  function removeFollowing(state, id, approved) {
     const it = state.items.find(x => x.id === id);
-    if (!it) return 0;
+    if (!it || it.type !== 'lecture') return 0;
     const list = classLectures(state, it.classId);
     const gone = new Set(list.slice(list.findIndex(x => x.id === id)).map(x => x.id));
-    state.items = state.items.filter(x => !gone.has(x.id));
-    return gone.size;
+    return removeItems(state, x => gone.has(x.id) && (!approved || approved.has(x.id)));
   }
 
   // ---------------------------------------------------------------- links
@@ -681,7 +770,7 @@
     isISO, addDays, diffDays, weekday, mondayOf, todayISO, dayOfMonth, fmtDay, fmtShort, fmtMedium, relative,
     uid, sorted, normalize, serialize, lectureNumbers, status, title, stats, upcoming, range, months, recurrence,
     weekIndex, weekDate, layoutWeeks, layoutRow, compact, classLectures, addClass, removeClass, moveClass, moveItemToWeek, addSeries, markThrough, markPastDone,
-    removeFollowing, normalizeLink, linkLabel, parseICS, calendarType, matchCalendarClass,
+    editItem, removeItems, removeFollowing, normalizeLink, linkLabel, parseICS, calendarType, matchCalendarClass,
   });
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Core;
