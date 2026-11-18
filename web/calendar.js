@@ -12,10 +12,6 @@
       ...fields.filter(field => field !== 'type' && item[field] !== item.calendar.original[field])]);
   }
 
-  function eventClass(state, feed, title) {
-    return state.classes.some(c => c.id === feed.classId) ? feed.classId : C.matchCalendarClass(title, state.classes);
-  }
-
   function importedItem(event, classId, assigned = false) {
     const original = { classId, type: event.type, title: event.title, date: event.date, link: event.link || '' };
     const item = Object.assign({ id: C.uid(), done: false }, original);
@@ -24,6 +20,7 @@
       if (assigned) item.calendar.edited = ['classId'];
       if (event.includeNotice) item.calendar.includeNotice = true;
     }
+    if (event.calendarImport) item.calendarImport = event.calendarImport;
     return item;
   }
 
@@ -47,7 +44,7 @@
       seen.add(k);
       const item = existing.get(k);
       const edited = item ? editedFields(item) : new Set();
-      const classId = eventClass(state, feed, event.title) ||
+      const classId = C.calendarClass(state.classes, feed, event.title) ||
         (item && state.classes.some(c => c.id === item.classId) ? item.classId : null);
       const type = event.type || C.calendarType(event);
       const incoming = { classId, type: type === 'skip' ? 'lecture' : type, title: event.title, date: event.date, link: event.link || '' };
@@ -106,16 +103,80 @@
 
   function importNotice(state, feedId, uid, occurrence) {
     const skipped = state.calendarSkipped;
-    // Different local files may contain the same UID. The dialog passes the exact entry.
     const index = typeof feedId === 'object' ? skipped.indexOf(feedId) :
       skipped.findIndex(e => e.feedId === feedId && e.uid === uid && e.occurrence === occurrence);
     if (index < 0) return;
     const [event] = skipped.splice(index, 1);
     const feed = state.calendars.find(f => f.id === event.feedId) || event;
-    const classId = eventClass(state, feed, event.title);
+    const classId = C.calendarClass(state.classes, feed, event.title);
     event.includeNotice = true;
     if (classId) state.items.push(importedItem(event, classId));
     else { delete event.classId; state.calendarUnmatched.push(event); }
+  }
+
+  const detailsKey = (classId, title, start) => JSON.stringify([classId, title, start]);
+
+  function importEvents(state, events, selectedClass) {
+    const summary = { added: 0, alreadyPresent: 0, unmatched: 0, skipped: 0 };
+    const identities = new Set(), details = new Set(), withoutUID = new Set();
+    const legacy = new Map();
+    const selected = { classId: selectedClass };
+    function remember(source, assignedClass) {
+      if (source.uid) identities.add(key(source));
+      const classes = !source.classId && assignedClass ? ['', assignedClass] : [source.classId];
+      for (const classId of classes) {
+        const matches = detailsKey(classId, source.title, source.start);
+        details.add(matches);
+        if (!source.uid) withoutUID.add(matches);
+      }
+    }
+    for (const entry of [...state.items, ...state.calendarUnmatched, ...state.calendarSkipped]) {
+      if (entry.feedId || entry.calendar || entry.calendarOrigin) continue;
+      if (entry.calendarImport) {
+        remember(entry.calendarImport, entry.classId);
+      } else {
+        // Older file imports only stored the display date. Use each legacy row at most once.
+        const k = detailsKey(entry.classId || '', entry.title, entry.date);
+        if (!legacy.has(k)) legacy.set(k, []);
+        legacy.get(k).push(entry);
+      }
+    }
+    for (const event of events) {
+      const { uid, title, date, start, occurrence } = event;
+      const classId = C.calendarClass(state.classes, selected, title) || '';
+      const source = { uid, occurrence, classId, title, start };
+      const matching = detailsKey(classId, title, start);
+      if (uid ? identities.has(key(source)) || withoutUID.has(matching) : details.has(matching)) {
+        summary.alreadyPresent++;
+        continue;
+      }
+
+      const candidates = legacy.get(detailsKey(classId, title, date));
+      const previous = candidates?.findIndex(entry => (event.type !== 'skip' || entry.feedId === '') &&
+        (!entry.uid || !uid || entry.uid === uid)) ?? -1;
+      if (previous >= 0) {
+        const [entry] = candidates.splice(previous, 1);
+        entry.calendarImport = source;
+        remember(source);
+        summary.alreadyPresent++;
+        continue;
+      }
+
+      const entry = { feedId: '', uid, occurrence, title, date, link: event.link,
+        type: event.type === 'skip' ? 'lecture' : event.type, calendarImport: source };
+      if (event.type === 'skip') {
+        state.calendarSkipped.push({ ...entry, classId });
+        summary.skipped++;
+      } else if (!classId) {
+        state.calendarUnmatched.push(entry);
+        summary.unmatched++;
+      } else {
+        state.items.push(importedItem(entry, classId));
+        summary.added++;
+      }
+      remember(source);
+    }
+    return summary;
   }
 
   function calendarURL(raw) {
@@ -142,13 +203,14 @@
     const refresh = () => { if (root.App && root.App.refreshCalendars) root.App.refreshCalendars(); };
     const change = (label, apply) => {
       const before = api.snapshot();
-      apply(state());
+      const result = apply(state());
       api.changed(before, label);
       refresh();
+      return result;
     };
-    function parseEvents(text) {
+    function parseEvents(text, options) {
       const unsupported = new Set();
-      return { events: C.parseICS(text, true, unsupported), unsupported };
+      return { events: C.parseICS(text, true, unsupported, options), unsupported };
     }
     async function fetchEvents(url) {
       const result = await api.call('calendarFetch', { url });
@@ -237,18 +299,11 @@
         const file = await api.call('calendarImport');
         if (!file) return;
         if (file.error) throw new Error(file.error);
-        const { events, unsupported } = parseEvents(file.text);
+        const { events, unsupported } = parseEvents(file.text, { fileImport: true });
         if (state().calendars !== feeds) throw new Error('Calendar list changed. Try again.');
         if (classId && !state().classes.some(c => c.id === classId)) throw new Error('Choose a class.');
-        change('Import Calendar', state => {
-          const temporary = { id: C.uid(), classId: classId || '' };
-          reconcile(state, temporary, events, unsupported);
-          for (const item of state.items) if (item.calendar && item.calendar.feedId === temporary.id) delete item.calendar;
-          for (const entry of state.calendarUnmatched.concat(state.calendarSkipped)) {
-            if (entry.feedId === temporary.id) entry.feedId = '';
-          }
-        });
-        if (unsupported.size) return recurrenceWarning;
+        const summary = change('Import Calendar', state => importEvents(state, events, classId));
+        return { ...summary, warning: unsupported.size ? recurrenceWarning : '' };
       },
     };
   }

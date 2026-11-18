@@ -127,6 +127,17 @@ test('range: starts the week of 1 Sep 2026, whole weeks, grows for outliers', ()
   eq(typo.end <= '2036-01-06', true);
 });
 
+test('outside the timeline includes finished and past items and uses whole-week bounds', () => {
+  const s = state(['a'], [
+    item('early', 'a', 'exam', '2019-12-15', { done: true }),
+    lec('first', 'a', '2019-12-30'), lec('last', 'a', '2036-01-06'),
+    lec('late', 'a', '2036-01-15'),
+  ]);
+  const r = C.range(s, TODAY);
+  eq([r.start, r.end], ['2019-12-30', '2036-01-06']);
+  eq(C.outsideRange(s.items, r).map(i => i.id), ['early', 'late']);
+});
+
 test('months: labels, year on the first and on January, sliver at the start is unnamed', () => {
   const m = C.months(C.range(state(['a'], []), TODAY));
   eq(m.slice(0, 3).map(x => [x.label, x.offset, x.days]), [['', 0, 1], ['September 2026', 1, 30], ['October', 31, 31]]);

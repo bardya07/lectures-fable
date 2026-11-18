@@ -152,6 +152,25 @@ svg { display: block; flex: none; }
 .up.soon .uw { color: var(--behind-text); }
 .up.late .uw, .up.late .ug { color: var(--late); }
 
+#outside-timeline {
+  flex: none;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line-2);
+}
+#outside-timeline summary { cursor: pointer; font-size: 12px; color: var(--fg-2); }
+.outside-items { max-height: min(180px, 30vh); overflow-y: auto; }
+.outside-items button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+}
+.outside-items button:hover { background: var(--hover); }
+.outside-items small { display: block; color: var(--fg-2); }
+
 /* ------------------------------------------------------------ grid shell */
 #scroller { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: none; outline: none; }
 #scroller.timeline { scroll-snap-type: x mandatory; scroll-padding-left: var(--side-w); }
@@ -622,6 +641,7 @@ dialog .weekdays button[aria-pressed="true"] { background: var(--fg); }
 .calendar-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .calendar-meta { margin-top: 3px; color: var(--fg-2); font-size: 11px; }
 #calendar-form { margin-top: 14px; }
+#calendar-summary { color: var(--fg-2); font-size: 12px; }
 #calendar-error { color: var(--late); font-size: 12px; }
 #calendar-unmatched, #calendar-skipped { padding-top: 12px; color: var(--fg-2); font-size: 12px; }
 #calendar-skipped summary { cursor: pointer; }

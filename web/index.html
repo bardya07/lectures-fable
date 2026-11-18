@@ -10,6 +10,10 @@
 <body>
 
 <div id="strip" hidden></div>
+<details id="outside-timeline" hidden>
+  <summary></summary>
+  <div class="outside-items"></div>
+</details>
 <main id="scroller" tabindex="-1"><div id="grid"></div></main>
 
 <div id="card" hidden></div>
@@ -75,6 +79,7 @@
   <form id="calendar-form" autocomplete="off" novalidate>
     <label class="field"><span>URL</span><input type="url" name="url" placeholder="https://" spellcheck="false" autocapitalize="off" autofocus></label>
     <label class="field"><span>Class</span><select name="classId"></select></label>
+    <div id="calendar-summary" role="status" hidden></div>
     <div id="calendar-error" role="alert" hidden></div>
     <footer>
       <button type="button" id="calendar-import">Import .ics</button>

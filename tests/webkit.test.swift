@@ -16,11 +16,13 @@ struct WebTests {
             html = try html.replacingOccurrences(of: "<script src=\"\(script).js\"></script>", with: "<script>" + read("web/\(script).js") + "</script>")
         }
         let tests = try read("tests/web.test.js")
+        let importFixture = String(decoding: try JSONEncoder().encode(read("tests/fixtures/import.ics")), as: UTF8.self)
         var checks = 0
         for scenario in ["ui", "corrupt", "unreadable", "partial"] {
             let setup = """
             <script>
             const scenario = '\(scenario)';
+            window.testCalendarImport = \(importFixture);
             const writes = [], warnings = [], copies = [];
             const partial = '{"classes":[{"id":"c","name":"Course"},null],"items":[]}';
             window.__testBridge = {

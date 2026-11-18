@@ -187,10 +187,19 @@ async function testWebRegressions() {
     confirm(false);
     await deleteClass;
     check('Class deletion rechecks the affected items', state().classes.length === 1 && state().items.some(i => i.calendar?.uid === 'another'));
+    text = fixture('Exam updated', '20261119', extraEvent('new', '20261130') + extraEvent('another', '20261207') +
+      extraEvent('notice', '20261214').replace('SUMMARY:Lecture', 'SUMMARY:Lecture cancelled'));
+    await hooks.sync(feed);
     bridge.confirm = () => true;
     await app.classAction('course', 'delete');
+    check('Deleting the class records the skipped occurrence in the saved data',
+      state().calendarTombstones.some(t => t.feedId === feed && t.uid === 'notice') && !state().calendarSkipped.length);
+    await hooks.sync(feed);
+    check('The deleted class feed occurrences stay out of the calendar lists on sync',
+      !state().items.length && !state().calendarUnmatched.length && !state().calendarSkipped.length);
     check('An empty new-class field permits undo of the last class deletion', document.activeElement.id === 'new-class-input' &&
-      app.command('undo') && state().classes[0].id === 'course');
+      app.command('undo') && state().classes[0].id === 'course' && item() &&
+      state().calendarSkipped.some(e => e.uid === 'notice') && !state().calendarTombstones.some(t => t.uid === 'notice'));
     const deleted = item().id;
     app.openItem(deleted);
     $('#item-delete').click();
@@ -218,17 +227,39 @@ async function testWebRegressions() {
     check('The week stepper can return to the final valid Friday', f.date.value === edge.date);
     $('#item-cancel').click();
 
-    bridge.calendarImport = () => ({ text: 'BEGIN:VCALENDAR\n' +
-      extraEvent('supported', '20261130').replace('SUMMARY:Lecture', 'SUMMARY:Imported lecture') +
-      extraEvent('unsupported', '20261130').replace('END:VEVENT', 'RRULE:FREQ=MONTHLY;COUNT=2\nEND:VEVENT') +
-      'END:VCALENDAR' });
+    bridge.calendarImport = () => ({ text: window.testCalendarImport });
     app.command('calendars');
     $('#calendar-form').elements.classId.value = 'course';
     $('#calendar-import').click();
     await until(() => !$('#calendar-import').disabled);
-    check('One-off import adds supported entries and reports unsupported recurrence',
-      state().items.some(i => i.title === 'Imported lecture' && !i.calendar) &&
-      state().items.length === 2 && $('#calendar-error').textContent.includes('unsupported recurrence'));
+    check('One-off import adds supported entries and reports unsupported recurrence (' +
+      [state().items.length, $('#calendar-summary').textContent, $('#calendar-error').textContent].join(', ') + ')',
+      state().items.length === 9 && $('#calendar-error').textContent.includes('unsupported recurrence') &&
+      $('#calendar-summary').textContent === '8 events imported · 0 already present · 1 skipped');
+    $('#calendar-close').click();
+
+    const outside = $('#outside-timeline');
+    check('The timeline shows a count of all items outside its bounds',
+      !outside.hidden && outside.querySelector('summary').textContent === '3 items outside the timeline');
+    outside.querySelector('summary').click();
+    const past = state().items.find(i => i.title === 'Past exam outside the timeline');
+    const future = state().items.find(i => i.title === 'Future lecture outside the timeline');
+    check('Past exams and future lectures can both be reached from the list',
+      outside.open && outside.querySelector('[data-id="' + past.id + '"]') && outside.querySelector('[data-id="' + future.id + '"]'));
+    outside.querySelector('[data-id="' + past.id + '"]').click();
+    check('The past exam opens through the usual editor', $('#item-dlg').open && f.date.value === past.date);
+    f.title.value = 'My old exam';
+    f.done.checked = true;
+    form.requestSubmit();
+    check('Done items are still visible outside the timeline', outside.textContent.includes('My old exam') && outside.textContent.includes('Done'));
+
+    app.command('calendars');
+    $('#calendar-form').elements.classId.value = 'course';
+    $('#calendar-import').click();
+    await until(() => !$('#calendar-import').disabled);
+    check('Repeat import reports existing events and preserves an edited item and its done state',
+      $('#calendar-summary').textContent === '0 events imported · 9 already present' && state().items.length === 9 &&
+      state().items.some(i => i.id === past.id && i.title === 'My old exam' && i.done));
     $('#calendar-close').click();
     return checks;
   } finally {

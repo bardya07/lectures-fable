@@ -29,6 +29,7 @@
   };
 
   const strip = $('#strip'), scroller = $('#scroller'), grid = $('#grid'), card = $('#card');
+  const outsideTimeline = $('#outside-timeline'), outsideItems = $('.outside-items', outsideTimeline);
   const toastEl = $('#toast'), measureEl = $('#measure'), dlg = $('#item-dlg'), form = $('#item-form');
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -356,6 +357,16 @@
     }).join('');
   }
 
+  function renderOutsideTimeline() {
+    const items = layout.R ? C.sorted(C.outsideRange(S.items, layout.R)) : [];
+    outsideTimeline.hidden = !items.length;
+    if (!items.length) outsideTimeline.open = false;
+    $('summary', outsideTimeline).textContent = plural(items.length, 'item') + ' outside the timeline';
+    outsideItems.innerHTML = items.map(it => '<button type="button" data-id="' + esc(it.id) + '">' +
+      '<span>' + esc(C.title(it, nums)) + '</span><small>' + esc(classOf(it.classId).name) + ' · ' + it.date +
+      (it.done ? ' · Done' : '') + '</small></button>').join('');
+  }
+
   // ---------------------------------------------------------------- render
   function render() {
     const previous = layout;
@@ -379,6 +390,7 @@
     }
     renderStrip();
     if (S.settings.view === 'compact') renderCompact(); else renderTimeline();
+    renderOutsideTimeline();
     if (selectedId !== null) {
       const selected = chipEl(selectedId);
       if (selected) selected.classList.add('selected');
@@ -1073,6 +1085,10 @@
     const b = e.target.closest('.up');
     if (b) itemMenu(b.dataset.id);
   });
+  outsideItems.addEventListener('click', e => {
+    const button = e.target.closest('button[data-id]');
+    if (button) openItem(button.dataset.id);
+  });
 
   // ---------------------------------------------------------------- toast
   let toastTimer = 0;
@@ -1267,7 +1283,7 @@
   // ---------------------------------------------------------------- calendars
   const calendarsDlg = $('#calendars-dlg'), calendarForm = $('#calendar-form');
   const calendarList = $('#calendar-list'), calendarUnmatched = $('#calendar-unmatched');
-  const calendarError = $('#calendar-error'), calendarSkipped = $('#calendar-skipped');
+  const calendarError = $('#calendar-error'), calendarSummary = $('#calendar-summary'), calendarSkipped = $('#calendar-skipped');
   const calendarNotices = $('#calendar-notices'), calendarURL = calendarForm.elements.url;
   let calendarFormBusy = false;
   let calendarClassOptions = '';
@@ -1310,21 +1326,28 @@
     calendarForm.querySelectorAll('input, select, button:not(#calendar-close)').forEach(el => { el.disabled = calendarFormBusy; });
   }
 
-  function clearCalendarError() {
+  function clearCalendarFeedback() {
     calendarError.textContent = '';
     calendarError.hidden = true;
+    calendarSummary.textContent = '';
+    calendarSummary.hidden = true;
   }
 
   async function calendarFormAction(action) {
     if (calendarFormBusy) return;
     calendarFormBusy = true;
-    clearCalendarError();
+    clearCalendarFeedback();
     refreshCalendars();
     try {
-      const notice = await action(window.CalendarUIHooks);
-      if (notice) {
-        calendarError.textContent = notice;
-        calendarError.hidden = false;
+      const result = await action(window.CalendarUIHooks);
+      if (result) {
+        const counts = [plural(result.added, 'event') + ' imported', result.alreadyPresent + ' already present'];
+        if (result.unmatched) counts.push(result.unmatched + ' unmatched');
+        if (result.skipped) counts.push(result.skipped + ' skipped');
+        calendarSummary.textContent = counts.join(' · ');
+        calendarSummary.hidden = false;
+        calendarError.textContent = result.warning;
+        calendarError.hidden = !result.warning;
       }
     }
     catch (error) {
@@ -1336,21 +1359,21 @@
 
   function openCalendars() {
     if (!window.CalendarUIHooks || calendarsDlg.open) return;
-    clearCalendarError();
+    clearCalendarFeedback();
     calendarSkipped.open = false;
     calendarsDlg.showModal();
     refreshCalendars();
     calendarURL.focus();
     syncNative();
   }
-  calendarForm.addEventListener('input', clearCalendarError);
+  calendarForm.addEventListener('input', clearCalendarFeedback);
   calendarURL.addEventListener('paste', e => {
     const value = e.clipboardData?.getData('text/plain');
     const replacing = !calendarURL.value || (calendarURL.selectionStart === 0 && calendarURL.selectionEnd === calendarURL.value.length);
     if (value && value !== value.trim() && replacing) {
       e.preventDefault();
       calendarURL.value = value.trim();
-      clearCalendarError();
+      clearCalendarFeedback();
     }
   });
   calendarForm.addEventListener('submit', e => {
@@ -1365,7 +1388,7 @@
   calendarList.addEventListener('click', e => {
     const button = e.target.closest('[data-calendar-action]');
     if (button && !button.disabled) {
-      clearCalendarError();
+      clearCalendarFeedback();
       window.CalendarUIHooks[button.dataset.calendarAction](button.dataset.id);
     }
   });

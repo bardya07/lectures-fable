@@ -5,6 +5,7 @@ const C = require('../web/core.js');
 const Calendar = require('../web/calendar.js');
 
 const canvas = fs.readFileSync(path.join(__dirname, 'fixtures', 'canvas.ics'), 'utf8');
+const importFixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'import.ics'), 'utf8');
 const calendar = (...events) => ['BEGIN:VCALENDAR', 'VERSION:2.0', ...events, 'END:VCALENDAR'].join('\r\n');
 const vevent = (summary, properties, uid = 'fixture@calendar.example.test') => [
   'BEGIN:VEVENT', 'UID:' + uid, 'SUMMARY:' + summary, ...properties, 'END:VEVENT',
@@ -112,6 +113,88 @@ async function testDeletedOccurrences() {
   await controller.add(url, 'a');
   assert.equal(state.items.length, 2);
   assert.notEqual(state.items[0].calendar.feedId, feed.id);
+}
+
+async function testDeletedClass() {
+  let state = C.normalize({ classes: [{ id: 'a', name: 'AST 441' }, { id: 'b', name: 'PHY 567' }], items: [] });
+  let source = calendar(vevent('Lecture without a class code', timed, 'assigned'),
+    vevent('No class today', allDay, 'assigned-notice'));
+  const controller = Calendar.createController({ state: () => state, snapshot: () => JSON.stringify(state),
+    changed() {}, call: () => ({ text: source }) });
+  await controller.add('https://calendar.example.test/assigned', 'a');
+  const assignedSource = source;
+  source = canvas;
+  await controller.add('https://calendar.example.test/auto', '');
+  const [assigned, auto] = state.calendars;
+  C.editItem(state.items.find(i => i.calendar.uid === 'assigned'), { classId: 'b', title: 'My lecture notes', done: true });
+  const before = JSON.stringify(C.serialize(state));
+  C.removeClass(state, 'a');
+  state = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  assert.deepEqual(state.calendarTombstones.map(t => t.uid).sort(),
+    ['assigned', 'assigned-notice', 'event-assignment-6000101', 'event-calendar-event-6000103']);
+  assert.equal(state.calendars[0].classId, '');
+  assert.equal(state.calendarSkipped.some(e => e.feedId === assigned.id), false);
+  await controller.sync(auto.id);
+  source = assignedSource.replace('No class today', 'Lecture once more');
+  await controller.sync(assigned.id);
+  assert.deepEqual(state.calendarUnmatched.map(e => e.uid), ['event-assignment-6000107']);
+  assert.ok(state.items.some(i => i.title === 'My lecture notes' && i.done && !i.calendar));
+  assert.ok(state.items.every(i => !i.calendar || !state.calendarTombstones.some(t => t.uid === i.calendar.uid)));
+
+  state = C.normalize(JSON.parse(before));
+  source = assignedSource;
+  await controller.sync(assigned.id);
+  assert.equal(state.calendars[0].classId, 'a');
+  assert.equal(state.calendarTombstones.length, 0);
+  assert.ok(state.calendarSkipped.some(e => e.uid === 'assigned-notice' && e.classId === 'a'));
+  assert.ok(state.items.some(i => i.calendar?.uid === 'assigned' && i.classId === 'b' && i.done));
+}
+
+async function testFileImportDeduplication() {
+  let state = C.normalize({ classes: [{ id: 'a', name: 'AST 441' }, { id: 'b', name: 'PHY 567' }], items: [
+    { id: 'old-import', classId: 'a', type: 'lecture', title: 'Lab', date: '2026-11-20', done: true },
+  ] });
+  let source = importFixture;
+  const controller = Calendar.createController({ state: () => state, snapshot: () => JSON.stringify(state),
+    changed() {}, call: () => ({ text: source }) });
+  const first = await controller.importFile('a');
+  assert.deepEqual([first.added, first.alreadyPresent, first.unmatched, first.skipped], [7, 1, 0, 1]);
+  assert.match(first.warning, /unsupported recurrence/);
+  const legacy = state.items.find(i => i.id === 'old-import');
+  assert.ok(legacy.done && legacy.calendarImport.uid === 'import-lab@example.test');
+  const moved = state.items.find(i => i.title === 'Rescheduled lecture');
+  const noUID = state.items.find(i => i.title === 'Drop-in lecture');
+  C.editItem(moved, { title: 'My recurring lecture notes', date: '2026-11-26', done: true, link: 'https://example.test/notes' });
+  C.editItem(noUID, { title: 'My drop-in notes', date: '2026-11-25', done: true, classId: 'b' });
+  state = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  const saved = JSON.stringify(C.serialize(state));
+  const again = await controller.importFile('a');
+  assert.deepEqual([again.added, again.alreadyPresent, again.unmatched, again.skipped], [0, 9, 0, 0]);
+  assert.equal(JSON.stringify(C.serialize(state)), saved);
+  assert.deepEqual(C.outsideRange(state.items, C.range(state, '2026-11-18')).map(i => i.date), ['2019-12-15', '2036-01-15']);
+
+  source = calendar(
+    vevent('Another date for the same occurrence', ['RECURRENCE-ID;TZID=Etc/GMT+8:20261123T100000', 'DTSTART:20261127T180000Z'], 'import-series@example.test'),
+    vevent('Lab with a revised title', ['DTSTART;TZID=Etc/GMT+8:20261120T100000'], 'import-lab@example.test'),
+    vevent('Lab', ['DTSTART:20261120T220000Z'], 'import-lab@example.test'),
+    vevent('Lab', ['DTSTART:20261120T180000Z'], 'import-other-lab@example.test'));
+  const overlap = await controller.importFile('a');
+  assert.deepEqual([overlap.added, overlap.alreadyPresent], [2, 2]);
+  assert.deepEqual(state.items.slice(0, 8), JSON.parse(saved).items);
+
+  source = calendar(vevent('Drop-in lecture', ['DTSTART:20261119T180000Z'], '').replace('UID:\r\n', ''));
+  assert.equal((await controller.importFile('b')).added, 1);
+  assert.equal((await controller.importFile('b')).alreadyPresent, 1);
+  source = source.replace('Drop-in lecture', 'Unmatched drop-in lecture');
+  assert.equal((await controller.importFile('')).unmatched, 1);
+  state = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  assert.equal((await controller.importFile('')).alreadyPresent, 1);
+  controller.assign('a');
+  assert.equal((await controller.importFile('a')).alreadyPresent, 1);
+  controller.importNotice(state.calendarSkipped[0]);
+  source = importFixture;
+  assert.equal((await controller.importFile('a')).alreadyPresent, 9);
+  assert.equal(state.calendarSkipped.length, 0);
 }
 
 function testRecurrence() {
@@ -294,6 +377,8 @@ async function testSyncWhileEditing() {
 
 async function main() {
   await testDeletedOccurrences();
+  await testDeletedClass();
+  await testFileImportDeduplication();
   await testUnchangedSync();
   await testRemovedUpstream();
   await testSyncWhileEditing();
@@ -468,8 +553,10 @@ async function main() {
   controller.importNotice('', localNote.uid, localNote.occurrence);
   assert.ok(state.items.some(item => !item.calendar && item.classId === 'c' && item.title === localNote.title));
   const secondFile = controller.importFile('b');
-  reply({ text: canvas.replace('Tutorials Cancelled Today', 'No class today') });
-  await secondFile;
+  reply({ text: canvas.replace('Tutorials Cancelled Today', 'No class today')
+    .replace('DTSTART:20261119T200000Z', 'DTSTART:20261119T210000Z') });
+  const overlap = await secondFile;
+  assert.deepEqual([overlap.added, overlap.alreadyPresent, overlap.skipped], [0, 6, 1]);
   const secondNote = state.calendarSkipped.find(note => note.title.startsWith('No class today'));
   controller.importNotice(secondNote);
   assert.ok(state.items.some(item => !item.calendar && item.classId === 'b' && item.title === secondNote.title));
