@@ -42,6 +42,8 @@ async function testWebRegressions() {
     if (!state().classes.length) {
       const input = $('#new-class-input');
       input.value = 'Before import';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: true }));
+      check('Confirming an IME candidate leaves the class draft open', !state().classes.length && input.value === 'Before import');
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       $('#new-class-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     }
@@ -73,6 +75,26 @@ async function testWebRegressions() {
     check('Toggling with the keyboard preserves chip focus', document.activeElement.dataset.id === 'lecture-18');
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
     check('Delete works after a keyboard toggle', !state().items.some(i => i.id === 'lecture-18'));
+    app.command('undo');
+    const hold = async id => {
+      const chip = $('.chip[data-id="' + id + '"]');
+      const event = { bubbles: true, pointerId: 1, button: 0 };
+      chip.dispatchEvent(new PointerEvent('pointerdown', event));
+      await sleep(370);
+      chip.dispatchEvent(new PointerEvent('pointerup', event));
+      await sleep(20);
+      if (!chip.classList.contains('selected')) throw new Error('Hold did not select ' + id);
+    };
+    await hold('lecture-18');
+    const nextChip = $('.chip[data-id="lecture-19"]');
+    nextChip.click();
+    check('Clicking a different chip clears a stale hold selection', !$('.chip.selected'));
+    app.command('undo');
+    await hold('lecture-18');
+    $('.chip[data-id="lecture-19"]').focus({ preventScroll: true });
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+    check('Delete follows keyboard focus after a hold selection', state().items.some(i => i.id === 'lecture-18') &&
+      !state().items.some(i => i.id === 'lecture-19'));
     app.command('undo');
 
     app.openItem(null, { date: '2019-12-30' });
@@ -123,13 +145,17 @@ async function testWebRegressions() {
     const draft = $('#rename-input');
     check('Sync preserves an inline draft and its caret', draft.value === 'Unsubmitted name' &&
       draft.selectionStart === 2 && draft.selectionEnd === 5 && document.activeElement === draft);
+    draft.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: true }));
+    check('IME confirmation does not submit an inline rename', $('#rename-input') === draft && state().classes[0].name === 'Course');
     draft.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     scroller.scrollLeft = app.inspect().layout.weekWidth * 3;
     await sleep(250);
     const monday = anchor();
+    scroller.style.width = '1012px';
     text = fixture('Exam updated', '20261119', extraEvent('early', '20250505'));
     await hooks.sync(feed);
-    check('Extending the timeline keeps the first visible Monday', anchor() === monday);
+    await sleep(250);
+    check('A sync extending the timeline during a resize keeps the first visible Monday', anchor() === monday);
 
     app.command('today');
     await sleep(800);
@@ -171,12 +197,39 @@ async function testWebRegressions() {
     check('The item form deletes the occurrence and saves its identity', !item() &&
       state().calendarTombstones.some(t => t.feedId === feed && t.uid === 'one' && t.occurrence === ''));
     const undoResult = app.command('undo');
-    check('Undo restores the feed item and its eligibility for sync (' +
-      [undoResult, document.activeElement.outerHTML.slice(0, 120), app.inspect().undo, app.inspect().redo].join(', ') + ')', item()?.id === deleted &&
+    check('Undo immediately after closing the editor restores the deleted feed item', undoResult && item()?.id === deleted &&
       !state().calendarTombstones.some(t => t.uid === 'one'));
     app.command('redo');
     await hooks.sync(feed);
     check('Redo keeps the deleted occurrence gone on sync', !item());
+
+    const edge = { id: 'edge', classId: 'course', type: 'assignment', date: '9999-12-31', title: 'Outside the timeline' };
+    bridge.import = () => ({ name: 'Outlier.json', text: JSON.stringify({ ...seed, items: [edge] }) });
+    app.command('import');
+    await until(() => state().items.some(i => i.id === edge.id));
+    $('#strip [data-id="edge"]').click();
+    check('A deadline beyond the timeline can be opened from its strip card', $('#item-dlg').open);
+    const dateState = [f.date.value, $('#date-days input:checked')?.value, $('#week-next').disabled,
+      document.querySelectorAll('#date-days input').length];
+    check('The final supported week has a valid selection and no next week (' + dateState.join(', ') + ')',
+      JSON.stringify(dateState) === JSON.stringify([edge.date, edge.date, true, 5]));
+    $('#week-prev').click();
+    $('#week-next').click();
+    check('The week stepper can return to the final valid Friday', f.date.value === edge.date);
+    $('#item-cancel').click();
+
+    bridge.calendarImport = () => ({ text: 'BEGIN:VCALENDAR\n' +
+      extraEvent('supported', '20261130').replace('SUMMARY:Lecture', 'SUMMARY:Imported lecture') +
+      extraEvent('unsupported', '20261130').replace('END:VEVENT', 'RRULE:FREQ=MONTHLY;COUNT=2\nEND:VEVENT') +
+      'END:VCALENDAR' });
+    app.command('calendars');
+    $('#calendar-form').elements.classId.value = 'course';
+    $('#calendar-import').click();
+    await until(() => !$('#calendar-import').disabled);
+    check('One-off import adds supported entries and reports unsupported recurrence',
+      state().items.some(i => i.title === 'Imported lecture' && !i.calendar) &&
+      state().items.length === 2 && $('#calendar-error').textContent.includes('unsupported recurrence'));
+    $('#calendar-close').click();
     return checks;
   } finally {
     scroller.style.width = '';

@@ -47,14 +47,17 @@ final class Store {
 
         do {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: legacyBackups.path) {
-                try fm.createDirectory(at: backups, withIntermediateDirectories: true)
-                for source in try fm.contentsOfDirectory(at: legacyBackups, includingPropertiesForKeys: nil) {
-                    try copyIfMissing(source, to: backups.appendingPathComponent(source.lastPathComponent))
+            try withDirectoryLock {
+                guard !fm.fileExists(atPath: file.path), try quarantinedFile() == nil else { return }
+                if fm.fileExists(atPath: legacyBackups.path) {
+                    try fm.createDirectory(at: backups, withIntermediateDirectories: true)
+                    for source in try fm.contentsOfDirectory(at: legacyBackups, includingPropertiesForKeys: nil) {
+                        try copyIfMissing(source, to: backups.appendingPathComponent(source.lastPathComponent))
+                    }
                 }
+                // Publish data.json last so an interrupted migration can retry the backups.
+                if fm.fileExists(atPath: legacyFile.path) { try copyIfMissing(legacyFile, to: file) }
             }
-            // Publish data.json last so an interrupted migration can retry the backups.
-            if fm.fileExists(atPath: legacyFile.path) { try copyIfMissing(legacyFile, to: file) }
         } catch {
             locked = true
             notice = "Your previous data couldn’t be copied to Grod, so changes won’t be saved this time.\n\n\(error.localizedDescription)"
@@ -76,6 +79,12 @@ final class Store {
     private func currentData() throws -> Data? {
         do { return try Data(contentsOf: file) }
         catch CocoaError.fileReadNoSuchFile { return nil }
+    }
+
+    private func quarantinedFile() throws -> String? {
+        try fm.contentsOfDirectory(atPath: directory.path).filter {
+            $0.range(of: #"^data\.unreadable-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}(-[0-9]{6})?\.json$"#, options: .regularExpression) != nil
+        }.max()
     }
 
     // Atomic writes prevent torn JSON. The directory lock also serializes the comparison
@@ -103,12 +112,16 @@ final class Store {
     /// The saved JSON text, or nil when there is nothing usable yet.
     func load() -> String? {
         guard !locked else { return nil }
+        notice = nil
         observedFile = true
         lastData = nil
         guard fm.fileExists(atPath: directory.path) else { return nil }
         do {
             return try withDirectoryLock {
-                guard let data = try currentData() else { return nil }
+                guard let data = try currentData() else {
+                    if let aside = try quarantinedFile() { reportQuarantine(aside) }
+                    return nil
+                }
                 if Store.isUsable(data), let text = Store.jsonText(data) {
                     lastData = data
                     let target = backups.appendingPathComponent("data-\(Store.stamp(day: true)).json")
@@ -120,7 +133,7 @@ final class Store {
                 }
                 let aside = try uniqueFile(in: directory, prefix: "data.unreadable-")
                 try fm.moveItem(at: file, to: aside)
-                notice = "The data file couldn’t be understood, so the app started empty. The file was kept as “\(aside.lastPathComponent)”."
+                reportQuarantine(aside.lastPathComponent)
                 return nil
             }
         } catch {
@@ -128,6 +141,10 @@ final class Store {
             notice = "Your data file couldn’t be read, so changes won’t be saved this time.\n\n\(error.localizedDescription)"
             return nil
         }
+    }
+
+    private func reportQuarantine(_ name: String) {
+        notice = "The data file couldn’t be understood, so the app started empty. The file was kept as “\(name)”."
     }
 
     func save(_ json: String) throws {
@@ -174,8 +191,9 @@ final class Store {
         let names = try files.filter { url in
             guard url.lastPathComponent.range(of: pattern, options: .regularExpression) != nil else { return false }
             return try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
-        }.map(\.lastPathComponent).sorted()
-        for old in names.dropLast(limit) { try fm.removeItem(at: backups.appendingPathComponent(old)) }
+        }.map(\.lastPathComponent).filter { $0 != target.lastPathComponent }.sorted()
+        // A clock or timezone change can make an older copy sort after this one.
+        for old in names.dropLast(limit - 1) { try fm.removeItem(at: backups.appendingPathComponent(old)) }
     }
 
     static func readBackup(at url: URL) throws -> String {

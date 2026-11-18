@@ -4,6 +4,10 @@
 
   const C = window.Core;
   const $ = (sel, el) => (el || document).querySelector(sel);
+  const activeControl = () => {
+    const active = document.activeElement;
+    return active?.closest('dialog:not([open])') ? null : active;
+  };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
@@ -356,7 +360,7 @@
   function render() {
     const previous = layout;
     const previousDay = today;
-    const active = document.activeElement;
+    const active = activeControl();
     const draft = active?.matches('#new-class-input, #rename-input') ? {
       id: active.id, classId: active.closest('.row')?.dataset.class, start: active.selectionStart, end: active.selectionEnd,
     } : null;
@@ -380,14 +384,14 @@
       if (selected) selected.classList.add('selected');
       else selectedId = null;
     }
-    rendering = false;
     scroller.scrollLeft = x;
     scroller.scrollTop = y;
     lastScrollLeft = scroller.scrollLeft;
-    if (view.center || (followToday && (previousDay !== today || previous.nowX !== layout.nowX))) {
+    const resized = previous.weekWidth !== layout.weekWidth;
+    if (view.center || (followToday && (resized || previousDay !== today || previous.nowX !== layout.nowX))) {
       view.center = false;
       scrollToNow(false);
-    } else if (previous.R && layout.R && previous.R.start !== layout.R.start) {
+    } else if (previous.R && layout.R && (resized || previous.R.start !== layout.R.start)) {
       const weeks = C.diffDays(previous.R.start, layout.R.start) / 7;
       moveHorizontally((Math.round(x / previous.weekWidth) + weeks) * WEEK_W, false);
     }
@@ -406,6 +410,7 @@
         chipEl(active.dataset.id)?.focus({ preventScroll: true });
       }
     }
+    rendering = false;
     syncNative();
   }
 
@@ -443,10 +448,7 @@
       if (followToday) scrollToNow(false);
       return;
     }
-    const firstWeek = Math.round(scroller.scrollLeft / WEEK_W);
     render();
-    if (followToday) scrollToNow(false);
-    else moveHorizontally(firstWeek * WEEK_W, false);
   }).observe(scroller);
 
   const chipEl = id => grid.querySelector('.chip[data-id="' + CSS.escape(id) + '"]');
@@ -771,7 +773,7 @@
     const escape = e.key === 'Escape';
     if (!escape && e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (e.defaultPrevented || e.isComposing || dlg.open || calendarsDlg.open) return;
-    const active = document.activeElement;
+    const active = activeControl();
     if (active && (active.matches('input, textarea, select') || active.isContentEditable)) return;
     const focused = active?.matches('#grid .chip') ? active : null;
     if (escape) {
@@ -802,6 +804,9 @@
   document.addEventListener('click', e => {
     if (e.target instanceof Element && !e.target.closest('button, input, select, textarea, a, [contenteditable], [data-act], #card, dialog')) clearSelection();
   });
+  grid.addEventListener('focusin', e => {
+    if (!press && !rendering && e.target.matches('.chip') && e.target.dataset.id !== selectedId) selectChip(null);
+  });
 
   grid.addEventListener('click', e => {
     const add = e.target.closest('.ghost');
@@ -816,6 +821,7 @@
     const chip = e.target.closest('.chip');
     if (chip) {
       const id = chip.dataset.id;
+      if (selectedId !== id) selectChip(null);
       hideCard();
       quietChip = id;
       if (e.metaKey) { openLink(id); return; }
@@ -884,6 +890,7 @@
   });
 
   grid.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;
     const t = e.target;
     if (t.id === 'new-class-input') {
       if (e.key === 'Enter') {
@@ -1059,7 +1066,7 @@
     const id = b.dataset.id;
     if (e.metaKey) { openLink(id); return; }
     if (S.settings.view !== 'timeline') setView('timeline');
-    reveal(id, true);
+    if (!reveal(id, true)) openItem(id);
   });
   strip.addEventListener('contextmenu', e => {
     e.preventDefault();
@@ -1092,13 +1099,15 @@
   function renderDatePicker() {
     const selected = f.date.value;
     const monday = C.mondayOf(selected);
-    const sunday = C.addDays(monday, 6);
+    const lastDay = Math.min(6, C.diffDays('9999-12-31', monday));
+    const sunday = C.addDays(monday, lastDay);
     const month = date => C.fmtShort(date).split(' ')[0];
     $('#week-label').textContent = C.fmtShort(monday) + '–' +
       (month(monday) === month(sunday) && monday.slice(0, 4) === sunday.slice(0, 4) ? +sunday.slice(8, 10) : C.fmtShort(sunday));
-    $('#week-prev').disabled = C.addDays(monday, -1) < datePickerMin;
-    $('#week-next').disabled = C.addDays(monday, 7) > datePickerMax;
+    $('#week-prev').disabled = monday <= datePickerMin;
+    $('#week-next').disabled = C.diffDays(datePickerMax, monday) < 7;
     dateDaysEl.innerHTML = C.WEEKDAYS.map((name, i) => {
+      if (i > lastDay) return '<span></span>';
       const date = C.addDays(monday, i);
       return '<label><input type="radio" name="day" value="' + date + '"' +
         (date === selected ? ' checked' : '') + (date < datePickerMin || date > datePickerMax ? ' disabled' : '') +
@@ -1107,10 +1116,9 @@
   }
 
   function stepWeek(delta) {
-    let date = C.addDays(f.date.value, delta * 7);
-    if (date < datePickerMin) date = datePickerMin;
-    if (date > datePickerMax) date = datePickerMax;
-    f.date.value = date;
+    const selected = f.date.value;
+    const offset = Math.max(C.diffDays(datePickerMin, selected), Math.min(delta * 7, C.diffDays(datePickerMax, selected)));
+    f.date.value = C.addDays(selected, offset);
     renderDatePicker();
     refreshForm();
   }
@@ -1140,7 +1148,7 @@
     f.type.value = v.type;
     // Imported items may be outside the normal add range; retain their week when editing.
     datePickerMin = it && v.date < C.RANGE_MIN ? C.mondayOf(v.date) : C.RANGE_MIN;
-    datePickerMax = it && v.date > C.RANGE_MAX ? C.addDays(C.mondayOf(v.date), 6) : C.RANGE_MAX;
+    datePickerMax = it && v.date > C.RANGE_MAX ? C.addDays(v.date, Math.min(6 - C.weekday(v.date), C.diffDays('9999-12-31', v.date))) : C.RANGE_MAX;
     f.date.value = v.date < datePickerMin ? datePickerMin : v.date > datePickerMax ? datePickerMax : v.date;
     f.until.min = C.RANGE_MIN;
     f.until.max = C.RANGE_MAX;
@@ -1312,7 +1320,13 @@
     calendarFormBusy = true;
     clearCalendarError();
     refreshCalendars();
-    try { await action(window.CalendarUIHooks); }
+    try {
+      const notice = await action(window.CalendarUIHooks);
+      if (notice) {
+        calendarError.textContent = notice;
+        calendarError.hidden = false;
+      }
+    }
     catch (error) {
       calendarError.textContent = error && error.message ? error.message : 'Calendar failed.';
       calendarError.hidden = false;
@@ -1414,7 +1428,7 @@
 
   // ---------------------------------------------------------------- commands from the menu bar and toolbar
   const textFocused = () => {
-    const a = document.activeElement;
+    const a = activeControl();
     // The untouched new-class field receives automatic focus after deleting the last class.
     if (a?.id === 'new-class-input' && !a.value && !a.dataset.typing) return false;
     return !!a && a.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(a.type);

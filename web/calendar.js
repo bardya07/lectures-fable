@@ -5,6 +5,7 @@
   const key = e => JSON.stringify([e.uid, e.occurrence || '']);
   const fields = C.CALENDAR_FIELDS;
   const entryFields = [...fields, 'includeNotice'];
+  const recurrenceWarning = 'Some calendar events use unsupported recurrence rules.';
 
   function editedFields(item) {
     return new Set([...(item.calendar.edited || []),
@@ -26,8 +27,9 @@
     return item;
   }
 
-  function reconcile(state, feed, events) {
+  function reconcile(state, feed, events, unsupported = new Set()) {
     const sameFeed = e => e.feedId === feed.id;
+    const canReconcile = e => sameFeed(e) && !unsupported.has(e.uid);
     const existing = new Map();
     const seen = new Set((state.calendarTombstones || []).filter(sameFeed).map(key));
     for (const item of state.items) {
@@ -41,7 +43,7 @@
     const unmatched = [], skipped = [];
     for (const event of events) {
       const k = key(event);
-      if (seen.has(k)) continue;
+      if (seen.has(k) || unsupported.has(event.uid)) continue;
       seen.add(k);
       const item = existing.get(k);
       const edited = item ? editedFields(item) : new Set();
@@ -75,7 +77,7 @@
       }
     }
     state.items = state.items.filter(item => {
-      if (!item.calendar || !sameFeed(item.calendar) || kept.has(item)) return true;
+      if (!item.calendar || !canReconcile(item.calendar) || kept.has(item)) return true;
       if (item.done || item.calendar.includeNotice || editedFields(item).size) {
         if (!seen.has(key(item.calendar))) {
           const { feedId, uid, occurrence } = item.calendar;
@@ -87,10 +89,10 @@
       return false;
     });
     function replaceEntries(entries, incoming) {
-      const previous = entries.filter(sameFeed);
+      const previous = entries.filter(canReconcile);
       if (previous.length === incoming.length && previous.every((entry, i) =>
         key(entry) === key(incoming[i]) && entryFields.every(f => entry[f] === incoming[i][f]))) return entries;
-      return entries.filter(e => !sameFeed(e)).concat(incoming);
+      return entries.filter(e => !canReconcile(e)).concat(incoming);
     }
     state.calendarUnmatched = replaceEntries(state.calendarUnmatched || [], unmatched);
     state.calendarSkipped = replaceEntries(state.calendarSkipped || [], skipped);
@@ -144,10 +146,14 @@
       api.changed(before, label);
       refresh();
     };
+    function parseEvents(text) {
+      const unsupported = new Set();
+      return { events: C.parseICS(text, true, unsupported), unsupported };
+    }
     async function fetchEvents(url) {
       const result = await api.call('calendarFetch', { url });
       if (result && result.error) throw new Error(result.error);
-      return C.parseICS(result && result.text, true);
+      return parseEvents(result && result.text);
     }
     async function sync(id) {
       const feed = state().calendars.find(f => f.id === id);
@@ -156,15 +162,16 @@
       errors.delete(feed);
       refresh();
       try {
-        const events = await fetchEvents(calendarURL(feed.url));
+        const { events, unsupported } = await fetchEvents(calendarURL(feed.url));
         if (api.finishEditing) await api.finishEditing();
         if (!state().calendars.includes(feed)) return;
         const before = api.snapshot();
-        reconcile(state(), feed, events);
+        reconcile(state(), feed, events, unsupported);
         const changedItems = api.snapshot() !== before;
-        feed.lastSynced = new Date().toISOString();
+        if (unsupported.size) errors.set(feed, recurrenceWarning);
+        if (changedItems || !unsupported.size) feed.lastSynced = new Date().toISOString();
         if (changedItems) api.changed(before, 'Sync Calendar');
-        else if (api.persist) api.persist();
+        else if (!unsupported.size && api.persist) api.persist();
       } catch (error) {
         if (state().calendars.includes(feed)) errors.set(feed, error.message || 'Calendar sync failed.');
       } finally {
@@ -191,13 +198,14 @@
         if (duplicate || adding.has(url)) throw new Error('Calendar already added.');
         adding.add(url);
         try {
-          const events = await fetchEvents(url);
+          const { events, unsupported } = await fetchEvents(url);
           if (state().calendars !== feeds) throw new Error('Calendar list changed. Try again.');
           if (classId && !state().classes.some(c => c.id === classId)) throw new Error('Choose a class.');
           const feed = { id: C.uid(), url, classId: classId || '', lastSynced: new Date().toISOString() };
+          if (unsupported.size) errors.set(feed, recurrenceWarning);
           change('Add Calendar', state => {
             state.calendars.push(feed);
-            reconcile(state, feed, events);
+            reconcile(state, feed, events, unsupported);
           });
         } finally {
           adding.delete(url);
@@ -229,17 +237,18 @@
         const file = await api.call('calendarImport');
         if (!file) return;
         if (file.error) throw new Error(file.error);
-        const events = C.parseICS(file.text, true);
+        const { events, unsupported } = parseEvents(file.text);
         if (state().calendars !== feeds) throw new Error('Calendar list changed. Try again.');
         if (classId && !state().classes.some(c => c.id === classId)) throw new Error('Choose a class.');
         change('Import Calendar', state => {
           const temporary = { id: C.uid(), classId: classId || '' };
-          reconcile(state, temporary, events);
+          reconcile(state, temporary, events, unsupported);
           for (const item of state.items) if (item.calendar && item.calendar.feedId === temporary.id) delete item.calendar;
           for (const entry of state.calendarUnmatched.concat(state.calendarSkipped)) {
             if (entry.feedId === temporary.id) entry.feedId = '';
           }
         });
+        if (unsupported.size) return recurrenceWarning;
       },
     };
   }

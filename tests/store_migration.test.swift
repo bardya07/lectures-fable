@@ -34,6 +34,14 @@ struct StoreMigrationTests {
                      "Migration should skip the legacy backups when Grod has a data file")
         try expectContents(Data(original.utf8), at: legacyFile)
         try expectContents(backupData, at: backup)
+        let corrupt = Data("corrupt Grod data".utf8)
+        try corrupt.write(to: reopened.file)
+        precondition(reopened.load() == nil && reopened.notice != nil)
+        let afterQuarantine = Store(applicationSupportDirectory: base)
+        precondition(afterQuarantine.load() == nil && afterQuarantine.notice?.contains("data.unreadable-") == true,
+                     "Reopening after quarantine must not silently restore stale legacy data")
+        precondition(!fm.fileExists(atPath: afterQuarantine.file.path))
+        try expectContents(Data(original.utf8), at: legacyFile)
         try testWriters(in: base.appendingPathComponent("writers"), original: original, updated: updated)
         try testBackups(in: base.appendingPathComponent("snapshots"), original: original)
         let encoded = Store(applicationSupportDirectory: base.appendingPathComponent("encoded"))
@@ -106,6 +114,17 @@ struct StoreMigrationTests {
         precondition(Set(contents) == Set(revisions.suffix(5)))
         try expectContents(Data(original.utf8), at: personal)
         precondition(fm.fileExists(atPath: folder.path))
+        for i in 1...5 {
+            let future = store.backups.appendingPathComponent("before-import-9999-01-0\(i)-000000.json")
+            try Data().write(to: future)
+        }
+        try store.save(original)
+        try store.backUpBeforeImport()
+        let retained = try fm.contentsOfDirectory(at: store.backups, includingPropertiesForKeys: [.isRegularFileKey])
+            .filter { $0.lastPathComponent != personal.lastPathComponent && $0.lastPathComponent != folder.lastPathComponent }
+        let retainedData = try retained.map { try Data(contentsOf: $0) }
+        precondition(retained.count == 5 && retainedData.contains(Data(original.utf8)),
+                     "Retention must keep the new backup even if older backups have future timestamps")
         for _ in 0..<2 {
             try Data("broken".utf8).write(to: store.file)
             precondition(store.load() == nil && store.notice != nil)
@@ -113,6 +132,7 @@ struct StoreMigrationTests {
         let aside = try fm.contentsOfDirectory(atPath: store.directory.path).filter { $0.hasPrefix("data.unreadable-") }
         precondition(aside.count == 2 && !fm.fileExists(atPath: store.file.path))
         try store.save(original)
+        precondition(store.load() == original && store.notice == nil, "Loading recovered data clears a stale quarantine notice")
     }
 
     private static func expectContents(_ expected: Data, at url: URL) throws {

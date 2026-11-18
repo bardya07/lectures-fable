@@ -130,6 +130,70 @@ function testRecurrence() {
     vevent('Changed', ['RECURRENCE-ID:20261117T070000Z', 'DTSTART:20261118T070000Z'])), true);
   assert.equal(replace.find(e => e.title === 'Changed').occurrence, '2026-11-16');
   assert.equal(C.parseICS(calendar(vevent('Class', [...allDay, 'EXDATE;VALUE=DATE:20261116'])), true).length, 0);
+  assert.deepEqual(C.parseICS(calendar(vevent('Lecture', [
+    'DTSTART;VALUE=DATE:99991224', 'RRULE:FREQ=WEEKLY',
+  ])), true).map(e => e.date), ['9999-12-24', '9999-12-31']);
+}
+
+async function testIncompleteFeedKeepsItems() {
+  const state = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [] });
+  let text = calendar(vevent('Lecture', weekly));
+  const ctl = Calendar.createController({ state: () => state, snapshot: () => JSON.stringify(state),
+    call: () => ({ text }), changed() {} });
+  await ctl.add('https://example.test/protected', 'a');
+  const [feed] = state.calendars;
+  const before = JSON.stringify(state);
+  for (const [properties, error] of [
+    [[...timed, 'RRULE:FREQ=MONTHLY;COUNT=2'], 'Some calendar events use unsupported recurrence rules.'],
+    [[...weekly, 'RDATE:20261202T180000Z'], 'Some calendar events use unsupported recurrence rules.'],
+    [[...weekly, 'RRULE:FREQ=WEEKLY;COUNT=3'], 'Some calendar events use unsupported recurrence rules.'],
+    [[...timed, 'RRULE:FREQ=WEEKLY;BYDAY='], 'Invalid weekly calendar rule.'],
+    [[...timed, 'RRULE:FREQ=WEEKLY;COUNT=2;COUNT=1'], 'Invalid weekly calendar rule.'],
+    [['DTSTART;TZID=Local/Unknown:20261116T180000'], 'Unsupported calendar time zone.'],
+    [[...allDay, 'DTEND:bad'], 'Invalid calendar end date.'],
+  ]) {
+    text = calendar(vevent('Lecture', properties));
+    await ctl.sync(feed.id);
+    assert.equal(JSON.stringify(state), before);
+    assert.equal(ctl.list().feeds[0].error, error);
+  }
+  text = calendar(calendar(vevent('Nested calendar', allDay)));
+  await ctl.sync(feed.id);
+  assert.equal(JSON.stringify(state), before);
+  assert.equal(ctl.list().feeds[0].error, 'Invalid calendar file.');
+
+  const known = state.items.map(item => item.id);
+  text = calendar(vevent('Lecture', [...timed, 'RRULE:FREQ=MONTHLY;COUNT=2']), vevent('New deadline', allDay, 'other'));
+  await ctl.sync(feed.id);
+  assert.deepEqual(state.items.slice(0, 2).map(item => item.id), known);
+  assert.equal(state.items[2].title, 'New deadline');
+  assert.match(ctl.list().feeds[0].error, /unsupported recurrence/);
+}
+
+function testRevisionsAndCanonicalTitles() {
+  const older = vevent('Stale series', [...timed, 'RRULE:FREQ=WEEKLY;COUNT=4', 'SEQUENCE:1']);
+  const newer = vevent('Latest series', [...weekly, 'SEQUENCE:2']);
+  const oldOverride = vevent('Earlier edit', ['RECURRENCE-ID:20261123T180000Z', 'DTSTART:20261124T180000Z', 'SEQUENCE:1']);
+  const newOverride = vevent('Latest edit', ['RECURRENCE-ID:20261123T180000Z', 'DTSTART:20261125T180000Z', 'SEQUENCE:2']);
+  for (const revisions of [[older, newer, newOverride, oldOverride], [newer, older, oldOverride, newOverride]]) {
+    assert.deepEqual(C.parseICS(calendar(...revisions), true).map(e => e.title), ['Latest series', 'Latest edit']);
+  }
+  const sameSequence = calendar(vevent('First revision', [...timed, 'SEQUENCE:1', 'DTSTAMP:20261101T120000Z']),
+    vevent('Most recent revision', [...timed, 'SEQUENCE:1', 'DTSTAMP:20261102T120000Z']));
+  assert.deepEqual(C.parseICS(sameSequence, true).map(e => e.title), ['Most recent revision']);
+
+  let state = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [],
+    calendars: [{ id: 'feed', url: 'https://example.test/title', classId: 'a' }] });
+  const longTitle = 'x'.repeat(199) + ' continuation';
+  const initial = C.parseICS(calendar(vevent(longTitle, allDay)), true);
+  Calendar.reconcile(state, state.calendars[0], initial);
+  // Grod 1.2.0 could save both copies with a space at the truncation boundary.
+  state.items[0].title += ' ';
+  state.items[0].calendar.original.title += ' ';
+  state = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  Calendar.reconcile(state, state.calendars[0], C.parseICS(calendar(vevent('Revised title', allDay)), true));
+  assert.equal(state.items[0].title, 'Revised title');
+  assert.equal(state.items[0].calendar.edited, undefined);
 }
 
 async function testUnchangedSync() {
@@ -186,6 +250,22 @@ function testDragAndDuplicates() {
   assert.deepEqual([item.classId, item.date], ['a', '2026-11-16']);
 }
 
+function testDeleteOneDuplicate() {
+  const state = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [],
+    calendars: [{ id: 'feed', url: 'https://example.test/duplicates', classId: 'a' }] });
+  const [feed] = state.calendars;
+  const events = C.parseICS(calendar(vevent('Lecture', allDay)), true);
+  Calendar.reconcile(state, feed, events);
+  const [first] = state.items;
+  const local = { ...first, id: 'other', title: 'My separate notes', done: true };
+  state.items.push(local);
+  C.removeItems(state, i => i.id === first.id);
+  const reopened = C.normalize(JSON.parse(JSON.stringify(C.serialize(state))));
+  Calendar.reconcile(reopened, reopened.calendars[0], events);
+  assert.deepEqual(reopened.items.map(i => [i.id, i.title, i.done, i.calendar]), [['other', 'My separate notes', true, undefined]]);
+  assert.equal(reopened.calendarTombstones.length, 1);
+}
+
 async function testSyncWhileEditing() {
   const s = C.normalize({ classes: [{ id: 'a', name: 'A' }], items: [] });
   let text = calendar(vevent('Lecture', timed));
@@ -217,8 +297,11 @@ async function main() {
   await testUnchangedSync();
   await testRemovedUpstream();
   await testSyncWhileEditing();
+  await testIncompleteFeedKeepsItems();
   testRecurrence();
+  testRevisionsAndCanonicalTitles();
   testDragAndDuplicates();
+  testDeleteOneDuplicate();
   for (const [title, properties, expected, uid] of cases) {
     const events = C.parseICS(calendar(vevent(title, properties, uid)), true);
     assert.ok(events.length, title);

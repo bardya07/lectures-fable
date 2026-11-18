@@ -25,9 +25,14 @@
   // Dates are 'YYYY-MM-DD' strings. Arithmetic goes through UTC day numbers so
   // daylight-saving changes can never shift a day.
   const pad2 = n => (n < 10 ? '0' : '') + n;
-  const dayNum = s => Math.round(Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) / DAY_MS);
+  function utcMillis(year, month, day, h = 0, m = 0, s = 0) {
+    const date = new Date(0);
+    date.setUTCFullYear(year, month, day);
+    return date.setUTCHours(h, m, s, 0);
+  }
+  const dayNum = s => Math.round(utcMillis(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) / DAY_MS);
   const toISO = n => new Date(n * DAY_MS).toISOString().slice(0, 10);
-  const isISO = s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && toISO(dayNum(s)) === s;
+  const isISO = s => typeof s === 'string' && /^(?!0000)\d{4}-\d{2}-\d{2}$/.test(s) && toISO(dayNum(s)) === s;
   const addDays = (s, n) => toISO(dayNum(s) + n);
   const diffDays = (a, b) => dayNum(a) - dayNum(b);
   const weekday = s => (new Date(dayNum(s) * DAY_MS).getUTCDay() + 6) % 7; // 0 = Monday
@@ -65,6 +70,7 @@
   }
 
   // ---------------------------------------------------------------- reading files
+  const itemTitle = title => title.trim().slice(0, 200).trimEnd();
   // Accepts this app's file, the original Lectures export ({classes, items}) and the
   // original Lectures data file ({state: {classes, items}, view}). Returns null if unusable.
   function normalize(raw, defaults = {}) {
@@ -75,6 +81,11 @@
     if (!src || typeof src !== 'object' || !Array.isArray(src.classes) || !Array.isArray(src.items)) return null;
 
     let dropped = 0;
+    function optionalEntries(entries) {
+      if (Array.isArray(entries)) return entries;
+      if (entries != null) dropped++;
+      return [];
+    }
     const classes = [];
     const classIds = new Set();
     const usedColors = new Set();
@@ -102,7 +113,7 @@
         id,
         classId: it.classId,
         type: it.type,
-        title: typeof it.title === 'string' ? it.title.trim().slice(0, 200) : '',
+        title: typeof it.title === 'string' ? itemTitle(it.title) : '',
         date: it.date,
         done: it.done === true,
         link: typeof it.link === 'string' ? it.link.trim() : '',
@@ -112,15 +123,16 @@
           typeof cal.occurrence === 'string' && original && typeof original.classId === 'string' &&
           TYPES.includes(original.type) && typeof original.title === 'string' && isISO(original.date) && typeof original.link === 'string') {
         item.calendar = { feedId: cal.feedId, uid: cal.uid, occurrence: cal.occurrence,
-          original: { classId: original.classId, type: original.type, title: original.title.slice(0, 200), date: original.date, link: original.link } };
+          original: { classId: original.classId, type: original.type, title: itemTitle(original.title), date: original.date, link: original.link.trim() } };
         if (Array.isArray(cal.edited)) item.calendar.edited = cal.edited.filter(f => CALENDAR_FIELDS.includes(f));
         if (cal.includeNotice === true) item.calendar.includeNotice = true;
       } else {
+        if (cal != null) dropped++;
         const origin = it.calendarOrigin;
         if (typeof origin?.feedId === 'string' && origin.feedId && typeof origin.uid === 'string' && origin.uid &&
             typeof origin.occurrence === 'string') {
           item.calendarOrigin = { feedId: origin.feedId, uid: origin.uid, occurrence: origin.occurrence };
-        }
+        } else if (origin != null) dropped++;
       }
       items.push(item);
     }
@@ -132,19 +144,19 @@
     };
     const calendars = [];
     const calendarIds = new Set();
-    for (const cal of Array.isArray(src.calendars) ? src.calendars : []) {
+    for (const cal of optionalEntries(src.calendars)) {
       if (!cal || typeof cal.id !== 'string' || !cal.id || calendarIds.has(cal.id) ||
-          typeof cal.url !== 'string' || !/^(https|webcal):\/\//i.test(cal.url)) continue;
+          typeof cal.url !== 'string' || !/^(https|webcal):\/\//i.test(cal.url)) { dropped++; continue; }
       calendarIds.add(cal.id);
       calendars.push({ id: cal.id, url: cal.url, classId: classIds.has(cal.classId) ? cal.classId : '',
         lastSynced: typeof cal.lastSynced === 'string' ? cal.lastSynced : '' });
     }
     function calendarEntries(entries, skipped) {
       const result = [];
-      for (const event of Array.isArray(entries) ? entries : []) {
+      for (const event of optionalEntries(entries)) {
         if (!event || !(event.feedId === '' || calendarIds.has(event.feedId)) || typeof event.uid !== 'string' || !event.uid ||
-            typeof event.occurrence !== 'string' || !isISO(event.date)) continue;
-        const title = typeof event.title === 'string' ? event.title.slice(0, 200) : '';
+            typeof event.occurrence !== 'string' || !isISO(event.date)) { dropped++; continue; }
+        const title = typeof event.title === 'string' ? itemTitle(event.title) : '';
         const inferred = TYPES.includes(event.type) ? event.type : calendarType(title);
         const entry = { feedId: event.feedId, uid: event.uid, occurrence: event.occurrence,
           title,
@@ -158,22 +170,26 @@
     }
     const calendarTombstones = [];
     const deleted = new Set();
-    for (const entry of Array.isArray(src.calendarTombstones) ? src.calendarTombstones : []) {
+    for (const entry of optionalEntries(src.calendarTombstones)) {
       if (!entry || !calendarIds.has(entry.feedId) || typeof entry.uid !== 'string' || !entry.uid ||
-          typeof entry.occurrence !== 'string' || deleted.has(calendarKey(entry))) continue;
+          typeof entry.occurrence !== 'string') { dropped++; continue; }
+      if (deleted.has(calendarKey(entry))) continue;
       deleted.add(calendarKey(entry));
       calendarTombstones.push({ feedId: entry.feedId, uid: entry.uid, occurrence: entry.occurrence });
     }
     for (const item of items) {
-      if (item.calendarOrigin && !calendarIds.has(item.calendarOrigin.feedId)) delete item.calendarOrigin;
+      for (const field of ['calendar', 'calendarOrigin']) {
+        if (item[field] && !calendarIds.has(item[field].feedId)) { delete item[field]; dropped++; }
+      }
     }
+    const calendarUnmatched = calendarEntries(src.calendarUnmatched, false).filter(e => !deleted.has(calendarKey(e)));
+    const calendarSkipped = calendarEntries(src.calendarSkipped, true).filter(e => !deleted.has(calendarKey(e)));
     return { classes, settings, calendars, calendarTombstones,
       items: items.filter(item => {
         const source = item.calendar || item.calendarOrigin;
         return !source || !deleted.has(calendarKey(source));
       }),
-      calendarUnmatched: calendarEntries(src.calendarUnmatched, false).filter(e => !deleted.has(calendarKey(e))),
-      calendarSkipped: calendarEntries(src.calendarSkipped, true).filter(e => !deleted.has(calendarKey(e))), dropped };
+      calendarUnmatched, calendarSkipped, dropped };
   }
 
   function nextColor(used) {
@@ -270,7 +286,7 @@
     while (i < r.days) {
       const y = +d.slice(0, 4);
       const m = +d.slice(5, 7);
-      const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const last = new Date(utcMillis(y, m, 0)).getUTCDate();
       const len = Math.min(last - dayOfMonth(d) + 1, r.days - i);
       out.push({ iso: d, offset: i, days: len, label: MONTHS[m - 1] + (out.length === 0 || m === 1 ? ' ' + y : '') });
       i += len;
@@ -300,38 +316,42 @@
 
   // ---------------------------------------------------------------- calendar feeds
   const icsText = s => String(s || '').replace(/\\([nN,;\\])/g, (_, c) => /[nN]/.test(c) ? '\n' : c);
-  const localISO = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  const localISO = d => String(d.getFullYear()).padStart(4, '0') + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 
   // Parse the wall time first. TZID conversion is done for each occurrence so DST
   // transitions do not move a weekly event by an hour.
-  function icsDate(value, params) {
+  function icsDate(value, params, strict) {
     const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/i.exec(value || '');
     if (!m) return null;
     const day = m[1] + '-' + m[2] + '-' + m[3];
     if (!isISO(day) || (m[4] && (+m[4] > 23 || +m[5] > 59 || +(m[6] || 0) > 59))) return null;
-    return { day, time: m[4] ? [ +m[4], +m[5], +(m[6] || 0) ] : null,
+    const spec = { day, time: m[4] ? [ +m[4], +m[5], +(m[6] || 0) ] : null,
       zone: m[7] ? 'UTC' : ((params && params.TZID) || '').replace(/^"|"$/g, '') };
+    if (spec.time && spec.zone && spec.zone !== 'UTC') {
+      try {
+        spec.formatter = new Intl.DateTimeFormat('en-US', { timeZone: spec.zone, year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+      } catch (_) {
+        if (strict) throw new Error('Unsupported calendar time zone.');
+      }
+    }
+    return spec;
   }
   function icsInstant(spec, day, skipGap = false) {
     if (!spec.time) return null;
     const [h, m, s] = spec.time;
     const y = +day.slice(0, 4), mo = +day.slice(5, 7) - 1, d = +day.slice(8, 10);
-    const wall = Date.UTC(y, mo, d, h, m, s);
+    const wall = utcMillis(y, mo, d, h, m, s);
     if (spec.zone === 'UTC') return wall;
-    if (spec.zone && spec.formatter === undefined) {
-      try {
-        spec.formatter = new Intl.DateTimeFormat('en-US', { timeZone: spec.zone, year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
-      } catch (_) { spec.formatter = null; }
-    }
     if (!spec.formatter) {
-      const local = new Date(y, mo, d, h, m, s);
+      const local = new Date(y < 100 ? y + 400 : y, mo, d, h, m, s);
+      if (y < 100) local.setFullYear(y, mo, d);
       if (skipGap && (local.getDate() !== d || local.getHours() !== h || local.getMinutes() !== m)) return null;
       return local.getTime();
     }
     const offsetAt = instant => {
       const p = Object.fromEntries(spec.formatter.formatToParts(new Date(instant)).map(part => [part.type, part.value]));
-      return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - instant;
+      return utcMillis(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - instant;
     };
     // A repeated wall time denotes the first occurrence. A standalone time in a gap
     // uses the pre-transition offset, while recurrence expansion omits nonexistent times.
@@ -392,7 +412,7 @@
   }
 
   function matchCalendarClass(summary, classes) {
-    const canonical = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const canonical = s => String(s || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim();
     const codes = s => (canonical(s).match(/\b[a-z]{2,8}\s*\d{2,4}[a-z]?\b/g) || []).map(code => code.replace(/\s/g, ''));
     const candidates = (classes || []).map(c => ({ id: c.id, name: canonical(c.name), codes: codes(c.name) }));
     const title = String(summary || '').replace(/\[[^\]]*\]/g, bracket =>
@@ -407,7 +427,10 @@
     const bracketCode = matchCode(Array.from(title.matchAll(/\[([^\]]*)\]/g)).flatMap(match => codes(match[1])));
     if (bracketCode) return bracketCode;
     const text = ' ' + canonical(title) + ' ';
-    const named = candidates.find(c => c.name && text.includes(' ' + c.name + ' '));
+    let named;
+    for (const candidate of candidates) {
+      if (candidate.name && (!named || candidate.name.length > named.name.length) && text.includes(' ' + candidate.name + ' ')) named = candidate;
+    }
     return named ? named.id : matchCode(codes(title));
   }
 
@@ -422,7 +445,7 @@
     return 0;
   }
 
-  function parseICS(text, strict) {
+  function parseICS(text, strict, unsupported) {
     const lines = String(text || '').trim().replace(/\r\n[ \t]|\n[ \t]|\r[ \t]/g, '').split(/\r\n|\n|\r/);
     if (strict && (!/^BEGIN:VCALENDAR$/i.test(lines[0]) || !/^END:VCALENDAR$/i.test(lines[lines.length - 1]))) {
       throw new Error('Invalid calendar file.');
@@ -434,16 +457,32 @@
     const occurrenceKey = (uid, spec, day) => JSON.stringify([uid, spec.time ? icsInstant(spec, day) : day]);
     let props = null, componentDepth = 0;
     const components = [];
-    const addEvent = p => {
+    const revisions = new Map();
+    const collectEvent = p => {
+      const uid = icsText(p.UID?.[0]?.value).trim();
+      const recurrence = p['RECURRENCE-ID']?.[0];
+      const original = recurrence && icsDate(recurrence.value, recurrence.params, strict);
+      if (!uid || (recurrence && !original)) {
+        if (strict) throw new Error('Invalid calendar event.');
+        return;
+      }
+      const identity = original ? occurrenceKey(uid, original, original.day) : JSON.stringify([uid]);
+      const sequence = p.SEQUENCE?.[0]?.value ?? '0';
+      if (strict && (!/^\d+$/.test(sequence) || !Number.isSafeInteger(+sequence))) throw new Error('Invalid calendar event sequence.');
+      const rawStamp = p.DTSTAMP?.[0]?.value?.toUpperCase();
+      const stamp = /^\d{8}T\d{6}Z$/.test(rawStamp) && icsDate(rawStamp, {}) ? rawStamp : '';
+      const prior = revisions.get(identity);
+      if (!prior || +sequence > prior.sequence || (+sequence === prior.sequence && stamp > prior.stamp)) {
+        revisions.set(identity, { props: p, uid, original, sequence: +sequence, stamp });
+      }
+    };
+    const addEvent = ({ props: p, uid: uidValue, original }) => {
       const first = name => (p[name] || [])[0];
       const value = name => (first(name) || {}).value;
       const start = first('DTSTART');
-      const uidProp = first('UID');
       const recurrenceId = first('RECURRENCE-ID');
-      const original = recurrenceId && icsDate(recurrenceId.value, recurrenceId.params);
-      const spec = start ? icsDate(start.value, start.params) : original;
-      const uidValue = uidProp && icsText(uidProp.value).trim();
-      if (!spec || !uidValue || (recurrenceId && !original)) {
+      const spec = start ? icsDate(start.value, start.params, strict) : original;
+      if (!spec) {
         if (strict) throw new Error('Invalid calendar event.');
         return;
       }
@@ -453,13 +492,27 @@
       const link = icsText(value('URL')).trim() || (match ? match[0].replace(/[.,;]+$/, '') : '');
       const categories = (p.CATEGORIES || []).map(category => icsText(category.value)).join(', ');
       const end = first('DTEND');
-      const duration = icsDuration(spec, end && icsDate(end.value, end.params), value('DURATION'));
+      const endDate = end && icsDate(end.value, end.params, strict);
+      if (strict && end && !endDate) throw new Error('Invalid calendar end date.');
+      const duration = icsDuration(spec, endDate, value('DURATION'));
       const rrule = first('RRULE');
+      const unsupportedRecurrence = () => {
+        if (unsupported) unsupported.add(uidValue);
+        else if (strict) throw new Error('Unsupported calendar recurrence.');
+      };
+      if (p.RDATE || p.EXRULE || p.RRULE?.length > 1 || recurrenceId?.params.RANGE) {
+        unsupportedRecurrence();
+        return;
+      }
       const emit = (day, recurring) => {
         const date = icsLocalDate(spec, day);
+        if (!isISO(date)) {
+          if (strict) throw new Error('Calendar date is outside the supported range.');
+          return;
+        }
         const type = calendarType({ uid: uidValue, title, date, link, description: descriptionText, categories,
           allDay: !spec.time, recurring: recurring || !!original, duration, status: value('STATUS') });
-        const event = { uid: uidValue, title: title.slice(0, 200), date, link,
+        const event = { uid: uidValue, title: itemTitle(title), date, link,
           occurrence: original ? original.day : recurring ? day : '', type };
         if (original) {
           overrides.set(occurrenceKey(uidValue, original, original.day), event);
@@ -470,7 +523,7 @@
       };
       const excludedDays = new Set(), excludedTimes = new Set();
       for (const ex of p.EXDATE || []) for (const value of ex.value.split(',')) {
-        const parsed = icsDate(value, ex.params);
+        const parsed = icsDate(value, ex.params, strict);
         if (!parsed) {
           if (strict) throw new Error('Invalid calendar exclusion date.');
           continue;
@@ -485,10 +538,18 @@
       const rule = {};
       for (const part of rrule.value.split(';')) {
         const at = part.indexOf('=');
-        if (at > 0) rule[part.slice(0, at).toUpperCase()] = part.slice(at + 1).toUpperCase();
+        const name = part.slice(0, at).toUpperCase();
+        if (at <= 0 || at === part.length - 1 || Object.hasOwn(rule, name)) {
+          if (strict) throw new Error('Invalid weekly calendar rule.');
+          return;
+        }
+        rule[name] = part.slice(at + 1).toUpperCase();
       }
       // Do not expand unsupported rule parts into misleading dates.
-      if (rule.FREQ !== 'WEEKLY' || Object.keys(rule).some(k => !['FREQ', 'BYDAY', 'UNTIL', 'COUNT', 'INTERVAL', 'WKST'].includes(k))) return;
+      if (rule.FREQ !== 'WEEKLY' || Object.keys(rule).some(k => !['FREQ', 'BYDAY', 'UNTIL', 'COUNT', 'INTERVAL', 'WKST'].includes(k))) {
+        unsupportedRecurrence();
+        return;
+      }
       const days = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
       const byday = rule.BYDAY ? rule.BYDAY.split(',').map(x => days.indexOf(x)) : [weekday(spec.day)];
       const interval = rule.INTERVAL === undefined ? 1 : Number(rule.INTERVAL);
@@ -501,7 +562,7 @@
         return;
       }
       const untilInstant = until?.time ? icsInstant(until, until.day) : null;
-      const lastDay = until ? dayNum(until.day) + (until.time ? 1 : 0) : Infinity;
+      const lastDay = Math.min(dayNum('9999-12-31'), until ? dayNum(until.day) + (until.time ? 1 : 0) : Infinity);
       const weekStart = rule.WKST ? days.indexOf(rule.WKST) : 0;
       const startWeek = dayNum(spec.day) - ((weekday(spec.day) - weekStart + 7) % 7);
       let seen = 0, produced = 0;
@@ -532,7 +593,7 @@
         if (component) {
           const name = component[2].toUpperCase();
           if (component[1].toUpperCase() === 'BEGIN') {
-            if (name === 'VEVENT' && components[components.length - 1] !== 'VCALENDAR') throw new Error('Invalid calendar file.');
+            if ((name === 'VCALENDAR' && components.length) || (name === 'VEVENT' && components.length !== 1)) throw new Error('Invalid calendar file.');
             components.push(name);
           } else if (components.pop() !== name) throw new Error('Invalid calendar file.');
         }
@@ -541,7 +602,7 @@
       if (/^BEGIN:VEVENT$/i.test(line)) { props = {}; componentDepth = 0; continue; }
       if (!props) continue;
       if (/^BEGIN:/i.test(line)) { componentDepth++; continue; }
-      if (/^END:VEVENT$/i.test(line) && componentDepth === 0) { addEvent(props); props = null; continue; }
+      if (/^END:VEVENT$/i.test(line) && componentDepth === 0) { collectEvent(props); props = null; continue; }
       if (/^END:/i.test(line)) { componentDepth = Math.max(0, componentDepth - 1); continue; }
       if (componentDepth) continue;
       if (!header) continue;
@@ -552,6 +613,7 @@
       (props[name] || (props[name] = [])).push({ value: line.slice(colon + 1), params });
     }
     if (strict && components.length) throw new Error('Invalid calendar file.');
+    for (const event of revisions.values()) addEvent(event);
     if (!overrides.size) return events;
     // Recurrence exceptions replace the generated instance regardless of their order in the file.
     const result = events.map(event => {
@@ -651,16 +713,31 @@
   // Only explicit user deletions suppress a feed occurrence. Upstream removals can return.
   function removeItems(state, matches) {
     const deleted = new Set((state.calendarTombstones || []).map(calendarKey));
+    const newlyDeleted = new Set();
     const before = state.items.length;
     state.items = state.items.filter(item => {
       if (!matches(item)) return true;
       const cal = item.calendar || item.calendarOrigin;
-      if (cal && !deleted.has(calendarKey(cal))) {
+      const key = cal && calendarKey(cal);
+      if (key && !deleted.has(key)) {
         (state.calendarTombstones ||= []).push({ feedId: cal.feedId, uid: cal.uid, occurrence: cal.occurrence });
-        deleted.add(calendarKey(cal));
+        deleted.add(key);
+        newlyDeleted.add(key);
       }
       return false;
     });
+    if (newlyDeleted.size) {
+      // A backup can contain multiple rows for one occurrence. Only the matched rows were deleted.
+      for (const item of state.items) {
+        const source = item.calendar || item.calendarOrigin;
+        if (source && newlyDeleted.has(calendarKey(source))) {
+          delete item.calendar;
+          delete item.calendarOrigin;
+        }
+      }
+      if (state.calendarUnmatched) state.calendarUnmatched = state.calendarUnmatched.filter(e => !newlyDeleted.has(calendarKey(e)));
+      if (state.calendarSkipped) state.calendarSkipped = state.calendarSkipped.filter(e => !newlyDeleted.has(calendarKey(e)));
+    }
     return before - state.items.length;
   }
 

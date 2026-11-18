@@ -47,6 +47,14 @@ test('today uses the local calendar day', () => {
   C.now = real;
 });
 
+test('early ISO years use the Gregorian year rather than a 1900 offset', () => {
+  eq(C.isISO('0004-02-29'), true);
+  eq(C.isISO('0099-02-29'), false);
+  eq(C.isISO('0000-01-01'), false);
+  eq(C.addDays('0099-12-31', 1), '0100-01-01');
+  eq(C.mondayOf('0001-01-01'), '0001-01-01');
+});
+
 test('lecture numbers follow date order per class, whatever order they were added in', () => {
   const s = state(['a', 'b'], [lec('x3', 'a', '2026-09-14'), lec('x1', 'a', '2026-09-09'), lec('y1', 'b', '2026-09-10'), lec('x2', 'a', '2026-09-11'),
     item('q', 'a', 'exam', '2026-09-10')]);
@@ -278,6 +286,14 @@ test('malformed optional data cannot hide an otherwise valid backup', () => {
   eq([d.classes.length, d.items[0].id, d.dropped, d.calendarUnmatched[0].title], [1, 'l', 1, '']);
 });
 
+test('discarded calendar records are counted so recovered data is backed up', () => {
+  const d = C.normalize({ classes: [{ id: 'c', name: 'C' }],
+    items: [lec('l', 'c', TODAY, { calendar: { uid: 'broken-link' } })],
+    calendars: [null], calendarUnmatched: [{ feedId: 'missing', uid: 'u' }],
+    calendarTombstones: { wrong: 'shape' } });
+  eq([d.dropped, d.items.length, d.items[0].calendar], [4, 1, undefined]);
+});
+
 test('long item links survive sync, export and reload without truncating the destination', () => {
   const Calendar = require('../web/calendar.js');
   const url = 'https://example.test/file?token=' + 'a'.repeat(2100);
@@ -345,6 +361,8 @@ test('calendar: summary type and class matching', () => {
   eq(C.matchCalendarClass('Calculus — Week 1', classes), 'b');
   eq(C.matchCalendarClass('Something else', classes), null);
   eq(C.matchCalendarClass('MBB 4380', classes), null);
+  eq(C.matchCalendarClass('Advanced Calculus — Week 1', [...classes, { id: 'c', name: 'Advanced Calculus' }]), 'c');
+  eq(C.matchCalendarClass('線形代数 — 授業', [{ id: 'c', name: '線形代数' }]), 'c');
 });
 
 test('calendar: feeds, event metadata and unmatched entries survive export/import', () => {
